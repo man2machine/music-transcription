@@ -1,3 +1,14 @@
+extra/
+logs/
+temp/
+
+*.wav
+*.log
+*.csv
+*.out
+
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
