@@ -11,8 +11,15 @@ import json
 import librosa
 import numpy as np
 
-class Note:
+from noteify.utils import JSONDictSerializable
+
+class Note(JSONDictSerializable):
     def __init__(self, freq, start_time, duration, volume=1):
+        assert 0 <= volume <= 1
+        assert start_time >= 0
+        assert freq > 0
+        assert duration > 0
+
         # detremine note and MIDI value using librosa
         self._actual_freq = freq
         self.freq = librosa.note_to_hz(librosa.hz_to_note(freq))
@@ -23,7 +30,7 @@ class Note:
         self.volume = volume
 
     def __repr__(self):
-        return str(self.serialize())
+        return str(self.to_dict())
     
     def get_freq(self):
         """
@@ -73,7 +80,7 @@ class Note:
         note = cls(data['freq'], data['start_time'], data['duration'], volume=data['volume'])
         return note
 
-class DecodedSong:
+class DecodedSong(JSONDictSerializable):
     def __init__(self, notes):
         self.notes = list(notes) # stores list of Note objects
     
