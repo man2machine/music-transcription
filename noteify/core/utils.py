@@ -45,15 +45,13 @@ def plot_roll_info(roll_info):
         fig.show()
 
 def write_events_to_midi(start_time, note_events, midi_path):
-    """Write out note events to MIDI file.
+    """
+    Write out note events to MIDI file.
 
-    Args:
-      start_time: float
-      note_events: list of dict, e.g. [
-        {'midi_note': 51, 'onset_time': 696.63544, 'offset_time': 696.9948, 'velocity': 44}, 
-        {'midi_note': 58, 'onset_time': 696.99585, 'offset_time': 697.18646, 'velocity': 50}
-        ...]
-      midi_path: str
+    Inputs:
+    start_time: float start time within the note events
+    note_events: list of note events created from create_note_event
+    midi_path: location to save
     """
     
     # This configuration is the same as MIDIs in MAESTRO dataset

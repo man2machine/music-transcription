@@ -27,7 +27,7 @@ from noteify.core.config import (
     SEGMENT_LENGTH, SEGMENT_SAMPLES, SEGMENT_FRAMES,
     FRAMES_PER_SECOND)
 
-SIZE_FLOAT = 4    # size of a float
+SIZE_FLOAT = 4 # size of a float
 
 class MusicNetDataset:
     URL = "https://homes.cs.washington.edu/~thickstn/media/musicnet.tar.gz"
@@ -59,7 +59,7 @@ class MusicNetDataset:
         if download:
             found_data = self.download()
         else:
-            found_data = self._check_exists()
+            found_data = self.check_exists()
 
         if not found_data:
             raise RuntimeError("Dataset not found")
@@ -106,7 +106,7 @@ class MusicNetDataset:
     def __close__(self):
         self.close()
 
-    def _check_exists(self):
+    def check_exists(self):
         paths = (os.path.join(self.root_dir, self.TRAIN_DATA_DIR),
                  os.path.join(self.root_dir, self.TEST_DATA_DIR),
                  os.path.join(self.root_dir, self.TRAIN_LABELS_DIR,
@@ -117,7 +117,7 @@ class MusicNetDataset:
         return exists and not self.refresh_cache
 
     def download(self):
-        if self._check_exists():
+        if self.check_exists():
             return True
 
         os.makedirs(os.path.join(self.root_dir,
@@ -411,7 +411,11 @@ class MusicNetSampler:
         self.shuffle = shuffle
         self.random_start_times = random_start_times
         self.rng = np.random.default_rng()
-    
+
+        self.generate_segments()
+        if self.num_batches is None:
+            self.num_batches = (len(self.segment_infos) + self.batch_size - 1) // self.batch_size
+        
     def generate_segments(self):
         self.segment_infos = []
         rec_ids = self.raw_dataset.rec_ids
@@ -428,12 +432,6 @@ class MusicNetSampler:
             self.rng.shuffle(self.segment_infos)
     
     def __iter__(self):
-        self.generate_segments()
-        if self.num_batches is None:
-            num_batches = (len(self.segment_infos) + self.batch_size - 1) // self.batch_size
-        else:
-            num_batches = self.num_batches
-        
         segment_index = 0
         for _ in range(num_batches):
             batch_indices = self.segment_infos[segment_index:segment_index+self.batch_size]
@@ -447,6 +445,9 @@ class MusicNetSampler:
                 else:
                     self.rng.shuffle(self.segment_infos)
 
+    def __len__(self):
+        return self.num_batches
+
 def music_data_collate_fn(unbatched_data):
     batched_data = {}
     batched_data['waveform'] = torch.tensor(np.stack([n[0] for n in unbatched_data]))
@@ -457,11 +458,11 @@ def music_data_collate_fn(unbatched_data):
 def get_musicnet_dataloader(proc_dataset, sampler, num_workers=4):
     if num_workers is not None:
         dataloader = torch_data.DataLoader(
-        dataset=proc_dataset,
-        batch_sampler=sampler,
-        collate_fn=music_data_collate_fn,
-        num_workers=num_workers,
-        pin_memory=False)
+            dataset=proc_dataset,
+            batch_sampler=sampler,
+            collate_fn=music_data_collate_fn,
+            num_workers=num_workers,
+            pin_memory=False)
     else:
         dataloader = torch_data.DataLoader(
             dataset=proc_dataset,
