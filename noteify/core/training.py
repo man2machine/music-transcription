@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from noteify.core.evaluation import targets_to_device, get_model_outputs
 from noteify.core.losses import compute_transcription_losses
+from noteify.core.evaluation import get_evaluation_stats
 
 def make_optimizer(model, lr=0.001, verbose=False):
     # Get all the parameters
@@ -104,8 +105,8 @@ def train_model(
     epoch_phases = ['train', 'test']
     
     for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-        print('-' * 10)
+        print("Epoch {}/{}".format(epoch, num_epochs - 1))
+        print("-" * 10)
         
         train_loss_info = {}
         
@@ -167,12 +168,14 @@ def train_model(
                     pbar.set_description(desc)
                     
                     del loss, loss_parts
-                    
+                pbar.close()
+
                 print("Training Loss: {:.4f}".format(epoch_loss))
                 train_loss_info['loss'] = train_loss_record
             
             elif epoch_phase == 'test':
-                pass
+                stats = get_evaluation_stats(model, dataloaders['test'], device)
+                print("Test statistics:", stats)
             
             torch.cuda.empty_cache()
         
@@ -193,6 +196,6 @@ def train_model(
             lr_scheduler.step()
 
     time_elapsed = time.time() - start_time
-    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    print("Training complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
     
     return tracker

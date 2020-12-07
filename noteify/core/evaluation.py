@@ -320,10 +320,3 @@ class TranscriptionProcessor:
         
         return note_events
 
-
-        
-
-        
-
-
-
