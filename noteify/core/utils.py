@@ -49,7 +49,7 @@ def write_events_to_midi(start_time, note_events, midi_path):
     Write out note events to MIDI file.
 
     Inputs:
-    start_time: float start time within the note events
+    start_time: float start time within note events
     note_events: list of note events created from create_note_event
     midi_path: location to save
     """

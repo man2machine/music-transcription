@@ -449,11 +449,11 @@ class MusicNetSampler:
         return self.num_batches
 
 def music_data_collate_fn(unbatched_data):
-    batched_data = {}
-    batched_data['waveform'] = torch.tensor(np.stack([n[0] for n in unbatched_data]))
+    batched_inputs = torch.tensor(np.stack([n[0] for n in unbatched_data]))
+    batched_targets = {}
     for key in unbatched_data[0][1].keys():
-        batched_data[key] = torch.tensor(np.stack([n[1][key] for n in unbatched_data]))
-    return batched_data
+        batched_targets[key] = torch.tensor(np.stack([n[1][key] for n in unbatched_data]))
+    return batched_inputs, batched_targets
 
 def get_musicnet_dataloader(proc_dataset, sampler, num_workers=4):
     if num_workers is not None:
