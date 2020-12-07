@@ -472,3 +472,19 @@ def get_musicnet_dataloader(proc_dataset, sampler, num_workers=4):
     
     return dataloader
 
+def get_musicnet_data(data_dir, batch_size):
+    raw_dataset_train = MusicNetDataset(data_dir, download=True, train=True)
+    raw_dataset_test = MusicNetDataset(data_dir, download=True, train=False)
+
+    dataset_train = MusicNetDatasetProcessed(raw_dataset_train, augmentor=MusicAugmentor())
+    sampler_train = MusicNetSampler(dataset_train, batch_size)
+    dataloader_train = get_musicnet_dataloader(dataset_train, sampler_train)
+
+    dataset_test = MusicNetDatasetProcessed(raw_dataset_test)
+    sampler_test = MusicNetSampler(dataset_test, batch_size)
+    dataloader_test = get_musicnet_dataloader(dataset_test, sampler_test)
+
+    datasets = {'train': dataset_train, 'test': dataset_test}
+    dataloaders = {'train': dataloader_train, 'test': dataloader_test}
+
+    return datasets, dataloaders

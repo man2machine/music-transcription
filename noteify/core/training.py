@@ -16,6 +16,8 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
+from noteify.core.losses import compute_transcription_losses
+
 def make_optimizer(model, lr=0.001, verbose=False):
     # Get all the parameters
     params_to_update = model.parameters()
@@ -40,6 +42,10 @@ def set_optimizer_lr(optimizer,
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+def make_scheduler(optimizer, epoch_steps, gamma):
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, epoch_steps, gamma=gamma)
+    return scheduler
+
 def get_timestamp():
     return datetime.datetime.now().strftime("%m-%d-%Y %I-%M%p")
 
@@ -47,8 +53,6 @@ class ModelTracker:
     def __init__(self, root_dir): 
         experiment_dir = "Experiment {}".format(get_timestamp())
         self.save_dir = os.path.join(root_dir, experiment_dir)
-        self.latest_model_weights = None
-        self.best_model_weights = None
         self.best_model_metric = float('-inf')
         self.record_per_epoch = {}
         os.makedirs(self.save_dir, exist_ok=True)
@@ -67,24 +71,20 @@ class ModelTracker:
                              metric=None,
                              save_best=True,
                              save_current=True):
-        self.latest_model_weights = model_state_dict
-        if metric is None or metric > self.best_model_metric:
-            self.best_model_metric = metric
-            self.best_model_weights = model_state_dict
+        update_best = metric is None or metric > self.best_model_metric
         
-        if save_best:
-            if save_current:
+        if save_best and update_best:
+            torch.save(model_state_dict, os.path.join(self.save_dir,
+                "Weights Best.pckl"))
+        if save_current:
                 torch.save(model_state_dict, os.path.join(self.save_dir,
                     "Weights Epoch {} {}.pckl".format(epoch, get_timestamp())))
-            torch.save(self.best_model_weights, os.path.join(self.save_dir,
-                "Weights Best.pckl"))
-
+            
 def train_model(
     device,
     model,
     dataloaders,
     optimizer,
-    criterion,
     save_dir,
     lr_scheduler=None,
     save_model=False,
@@ -133,7 +133,7 @@ def train_model(
                     # forward
                     with torch.set_grad_enabled(True):
                         # Get model outputs and calculate loss 
-                        loss = criterion.main_loss(model, inputs, device)
+                        loss = compute_transcription_losses(model, inputs)
                         
                         # loss parts are for debugging purposes
                         loss_parts = loss
@@ -193,4 +193,4 @@ def train_model(
     time_elapsed = time.time() - start_time
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     
-    return model, tracker
+    return tracker
