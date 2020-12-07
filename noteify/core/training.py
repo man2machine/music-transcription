@@ -169,8 +169,7 @@ def train_model(
                 train_loss_info['loss'] = train_loss_record
             
             elif epoch_phase == 'test':
-                if labeled:
-                    pass
+                pass
             
             torch.cuda.empty_cache()
         

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from nnAudio import Spectrogram as nn_spectrogram
 
-from noteify.core.config import (SAMPLE_RATE, FMIN_FREQ, BINS_PER_OCTAVE, NUM_NOTES, NUM_BINS,
+from noteify.core.config import (SAMPLE_RATE, MIN_FREQ, BINS_PER_OCTAVE, NUM_NOTES, NUM_BINS,
                                  HOP_LENGTH, SEGMENT_SAMPLES, SEGMENT_FRAMES, EPSILON)
 
 class SpectrogramLayer(nn.Module):
@@ -24,7 +24,7 @@ class SpectrogramLayer(nn.Module):
         super().__init__()
 
         self.spec_layer = nn_spectrogram.CQT1992v2(sr=SAMPLE_RATE,
-                                                   fmin=FMIN_FREQ,
+                                                   fmin=MIN_FREQ,
                                                    n_bins=NUM_BINS,
                                                    bins_per_octave=BINS_PER_OCTAVE,
                                                    hop_length=HOP_LENGTH,
@@ -147,7 +147,7 @@ class AcousticCRNN(nn.Module):
         x = self.fc1(x) # (batch_size, time_steps, linear_feats)
         x = self.bn1(x.transpose(1, 2)).transpose(1, 2) # (batch_size, time_steps, linear_feats) normed on linear_feats axis
 
-        x, _ = self.rnn(x) # (batch_size, time_steps, rnn_feats*2)
+        x, _ = self.rnn(x) # (batch_size, time_steps, rnn_feats * 2)
         x = self.dropout(x)
         x = self.fc2(x) # (batch_size, time_steps, num_notes)
 
@@ -169,9 +169,11 @@ class TranscriptionNN(nn.Module):
         self.onset_model = AcousticCRNN()
         self.offset_model = AcousticCRNN()
 
-        self.frame_rnn = nn.GRU(input_size=NUM_NOTES * 3, hidden_size=256, num_layers=1, 
+        self.rnn_feats = 256
+
+        self.frame_rnn = nn.GRU(input_size=NUM_NOTES * 3, hidden_size=self.rnn_feats, num_layers=1, 
             bias=True, batch_first=True, dropout=0.0, bidirectional=True)
-        self.frame_fc = nn.Linear(512, NUM_NOTES, bias=True) # 2 * 256 as it is bidirectional
+        self.frame_fc = nn.Linear(self.rnn_feats*2, NUM_NOTES, bias=True)
         self.dropout = nn.Dropout(0.5)
 
         self._initialize_weights()
@@ -204,9 +206,9 @@ class TranscriptionNN(nn.Module):
         cond_input = torch.cat((frame_output,
                                 onset_output.detach(),
                                 offset_output.detach()), dim=2) # (batch_size, num_frames, num_notes * 3)
-        frame_output, _ = self.frame_rnn(cond_input)
-        frame_output = self.dropout(frame_output) # (batch_size, num_channels, num_frames, num_notes)
-        frame_output = self.frame_fc(frame_output)
+        frame_output, _ = self.frame_rnn(cond_input) # (batch_size, num_channels, num_frames, rnn_feats * 2)
+        frame_output = self.dropout(frame_output) # (batch_size, num_channels, num_frames, rnn_feats * 2)
+        frame_output = self.frame_fc(frame_output) # (batch_size, num_channels, num_frames, num_notes)
         
         if apply_sigmoid:
             frame_output = torch.sigmoid(frame_output)

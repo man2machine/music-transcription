@@ -23,7 +23,7 @@ from scipy.io import wavfile
 from intervaltree import IntervalTree
 
 from noteify.core.config import (
-    SAMPLE_RATE, HOP_LENGTH, NUM_NOTES, FMIN_MIDI,
+    SAMPLE_RATE, HOP_LENGTH, NUM_NOTES, MIN_MIDI,
     SEGMENT_LENGTH, SEGMENT_SAMPLES, SEGMENT_FRAMES,
     FRAMES_PER_SECOND)
 
@@ -317,7 +317,7 @@ def generate_rolls(note_events, start_time):
     mask_roll = np.ones((SEGMENT_FRAMES, NUM_NOTES))
 
     for note_event in note_events:
-        note_index = note_event['midi_note'] - FMIN_MIDI
+        note_index = note_event['midi_note'] - MIN_MIDI
         note_index = np.clip(note_index, 0, NUM_NOTES)
 
         if 0 <= note_index <= NUM_NOTES:
