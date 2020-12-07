@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
+from noteify.core.evaluation import targets_to_device, get_model_outputs
 from noteify.core.losses import compute_transcription_losses
 
 def make_optimizer(model, lr=0.001, verbose=False):
@@ -124,16 +125,18 @@ def train_model(
                 # Iterate over data.
                 # TQDM has nice progress bars
                 pbar = tqdm(dataloaders['train'])
-                for inputs in pbar:
+                for inputs, targets in pbar:
                     inputs = inputs.to(device)
+                    targets_to_device(targets, device)
                     
                     # zero the parameter gradients
                     optimizer.zero_grad()
                     
                     # forward
                     with torch.set_grad_enabled(True):
-                        # Get model outputs and calculate loss 
-                        loss = compute_transcription_losses(model, inputs)
+                        # Get model outputs and calculate loss
+                        outputs = model(inputs)
+                        loss = compute_transcription_losses(outputs, targets)
                         
                         # loss parts are for debugging purposes
                         loss_parts = loss

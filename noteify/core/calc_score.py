@@ -25,24 +25,24 @@ def get_est_on_offs():
 def get_est_midi_notes():
     return None
 
-def calculate_average_stats(list_stats):
-    if len(list_stats) == 0:
+def calculate_average_stats(song_stats):
+    if len(song_stats) == 0:
         return {}
     
     average_stats = {}
-    average_stats['frame_precision'] = np.average([stat['frame_precision'] for stat in list_stats])
-    average_stats['frame_recall']    = np.average([stat['frame_recall'] for stat in list_stats])
-    average_stats['frame_f1']        = np.average([stat['frame_f1'] for stat in list_stats])
+    average_stats['frame_precision'] = np.average([stat['frame_precision'] for stat in song_stats])
+    average_stats['frame_recall']    = np.average([stat['frame_recall'] for stat in song_stats])
+    average_stats['frame_f1']        = np.average([stat['frame_f1'] for stat in song_stats])
     
-    if 'note_precision' in list_stats[0].keys():
-        average_stats['note_precision']  = np.average([stat['note_precision'] for stat in list_stats])
-        average_stats['note_recall']     = np.average([stat['note_recall'] for stat in list_stats])
-        average_stats['note_f1']         = np.average([stat['note_f1'] for stat in list_stats])
+    if 'note_precision' in song_stats[0].keys():
+        average_stats['note_precision']  = np.average([stat['note_precision'] for stat in song_stats])
+        average_stats['note_recall']     = np.average([stat['note_recall'] for stat in song_stats])
+        average_stats['note_f1']         = np.average([stat['note_f1'] for stat in song_stats])
     
-    if 'reg_note_precision' in list_stats[0].keys():
-        average_stats['reg_note_precision']  = np.average([stat['reg_note_precision'] for stat in list_stats])
-        average_stats['reg_note_recall']     = np.average([stat['reg_note_recall'] for stat in list_stats])
-        average_stats['reg_note_f1']         = np.average([stat['reg_note_f1'] for stat in list_stats])
+    if 'reg_note_precision' in song_stats[0].keys():
+        average_stats['reg_note_precision']  = np.average([stat['reg_note_precision'] for stat in song_stats])
+        average_stats['reg_note_recall']     = np.average([stat['reg_note_recall'] for stat in song_stats])
+        average_stats['reg_note_f1']         = np.average([stat['reg_note_f1'] for stat in song_stats])
     
     return average_stats
 
@@ -70,7 +70,6 @@ def calculate_score_per_song(model, dataloader, device):
         stats['frame_precision'] = tmp[0][1]
         stats['frame_recall'] = tmp[1][1]
         stats['frame_f1'] = tmp[2][1]
-        
     
     if 'onset_output' in outputs.keys() and 'offset_output' in outputs.keys():
         ref_on_off_pairs = np.array([[event['onset_time'], event['offset_time']] for event in get_note_events()])
