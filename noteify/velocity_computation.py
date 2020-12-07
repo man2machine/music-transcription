@@ -47,4 +47,4 @@ img = librosa.display.specshow(librosa.amplitude_to_db(C, ref=np.max),
                                sr=sr, x_axis='time', y_axis='cqt_note', ax=ax)
 ax.set_title('Constant-Q power spectrum')
 fig.colorbar(img, ax=ax, format="%+2.0f dB")
-    
+

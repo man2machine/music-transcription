@@ -261,9 +261,9 @@ def decode_song(x, sr, detect_ends=True, draw=False):
     if draw: # display onset envelope, onsets and note detection frames
         plt.plot(times, onset_envelope, label='Onset strength')
         plt.vlines(onset_times, 0, onset_envelope.max(), color='r', alpha=0.9,
-                    linestyle='--', label='Onsets')
+                   linestyle='--', label='Onsets')
         plt.vlines(note_detect_times, 0, onset_envelope.max(), color='g', alpha=0.9,
-                    linestyle='--', label='Note detect')
+                   linestyle='--', label='Note detect')
         plt.axis('tight')
         plt.legend(frameon=True, framealpha=0.75)
         plt.show()

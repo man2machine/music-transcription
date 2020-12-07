@@ -5,61 +5,191 @@ Created on Wed Dec  2 01:21:39 2020
 @author: Shahir
 """
 
+import os
+import time
+import datetime
+import pickle
+
 import numpy as np
-import scipy as sp
-import matplotlib.pyplot as plt
-from scipy.io import wavfile
-
-import librosa
-
 import torch
-from nnAudio import Spectrogram as nn_spectrogram
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
 
-SAMPLE_RATE = 16000 # highest note detected is C8 4186.009 Hz
-FMIN = 27.500 # A0
-BINS_PER_NOTE = 8
-BINS_PER_OCTAVE = 12 * BINS_PER_NOTE
-NUM_BINS = 88 * BINS_PER_NOTE
+from noteify.core.losses import compute_transcription_losses
 
-device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
+def make_optimizer(model, lr=0.001, verbose=False):
+    # Get all the parameters
+    params_to_update = model.parameters()
+    
+    if verbose:
+        print("Params to learn:")
+        for name, param in model.named_parameters():
+            if param.requires_grad == True:
+                print("\t", name)
+    
+    optimizer = optim.Adam(params_to_update, lr=lr) #, weight_decay=1e-4)
+    nn.utils.clip_grad_norm_(params_to_update, 3.0)
+    
+    return optimizer
 
-sr, x = wavfile.read("fantasia.wav")
-x = x / (1 << 15)
+def get_lr(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group['lr']
 
-x = librosa.resample(x.astype(np.float), sr, SAMPLE_RATE)
-sr = SAMPLE_RATE
+def set_optimizer_lr(optimizer,
+                     lr):
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
-x = x[:sr*5]
+def make_scheduler(optimizer, epoch_steps, gamma):
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, epoch_steps, gamma=gamma)
+    return scheduler
 
-x = x.copy()
-if len(x.shape) > 1:
-    x = x.mean(axis=1)
-x = torch.tensor(x).float().view(1, -1)
+def get_timestamp():
+    return datetime.datetime.now().strftime("%m-%d-%Y %I-%M%p")
 
-spec_layer = nn_spectrogram.CQT1992v2(sr=sr,
-                                      fmin=FMIN,
-                                      n_bins=NUM_BINS,
-                                      bins_per_octave=BINS_PER_OCTAVE,
-                                      hop_length=512,
-                                      window='hann',
-                                      output_format='Magnitude')
+class ModelTracker:
+    def __init__(self, root_dir): 
+        experiment_dir = "Experiment {}".format(get_timestamp())
+        self.save_dir = os.path.join(root_dir, experiment_dir)
+        self.best_model_metric = float('-inf')
+        self.record_per_epoch = {}
+        os.makedirs(self.save_dir, exist_ok=True)
+    
+    def update_info_history(self,
+                            epoch,
+                            info):
+        self.record_per_epoch[epoch] = info
+        fname = "Experiment Epoch Info History.pckl"
+        with open(os.path.join(self.save_dir, fname), 'wb') as f:
+            pickle.dump(self.record_per_epoch, f)
+    
+    def update_model_weights(self,
+                             epoch,
+                             model_state_dict,
+                             metric=None,
+                             save_best=True,
+                             save_current=True):
+        update_best = metric is None or metric > self.best_model_metric
+        
+        if save_best and update_best:
+            torch.save(model_state_dict, os.path.join(self.save_dir,
+                "Weights Best.pckl"))
+        if save_current:
+                torch.save(model_state_dict, os.path.join(self.save_dir,
+                    "Weights Epoch {} {}.pckl".format(epoch, get_timestamp())))
+            
+def train_model(
+    device,
+    model,
+    dataloaders,
+    optimizer,
+    save_dir,
+    lr_scheduler=None,
+    save_model=False,
+    save_best=False,
+    save_all=False,
+    save_log=False,
+    num_epochs=1,
+    train_batch_multiplier=1):
+    
+    start_time = time.time()
+    
+    tracker = ModelTracker(save_dir)
+    
+    train_batch_multiplier = int(train_batch_multiplier)
 
-freqs = librosa.cqt_frequencies(n_bins=NUM_BINS,
-                                fmin=FMIN,
-                                bins_per_octave=BINS_PER_OCTAVE)
+    epoch_phases = ['train', 'test']
+    
+    for epoch in range(num_epochs):
+        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
+        print('-' * 10)
+        
+        train_loss_info = {}
+        
+        # Each epoch has a training and validation phase
+        for epoch_phase in epoch_phases:
+            if epoch_phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
+            
+            if epoch_phase == 'train':
+                running_loss = 0.0   
+                running_count = 0
+                batch_count = 0
+                
+                train_loss_record = []
+                # Iterate over data.
+                # TQDM has nice progress bars
+                pbar = tqdm(dataloaders['train'])
+                for inputs in pbar:
+                    inputs = inputs.to(device)
+                    
+                    # zero the parameter gradients
+                    optimizer.zero_grad()
+                    
+                    # forward
+                    with torch.set_grad_enabled(True):
+                        # Get model outputs and calculate loss 
+                        loss = compute_transcription_losses(model, inputs)
+                        
+                        # loss parts are for debugging purposes
+                        loss_parts = loss
+                        try:
+                            iter(loss_parts)
+                        except TypeError:
+                            loss_parts = [loss_parts]
+                        
+                        loss = sum(loss_parts)
+                        train_loss_record.append([n.detach().item() for n in loss_parts])
+                        
+                        loss.backward()
+                        if batch_count == 0:
+                            optimizer.step()
+                            batch_count = train_batch_multiplier
+                    
+                        batch_count -= 1
+                        
+                    running_loss += loss.detach().item() * inputs.size(0)
+                    running_count += inputs.size(0)
+                    epoch_loss = running_loss / running_count
+                    
+                    loss_fmt = "{:.4f}"
+                    desc = "Avg. Loss: {}, Total Loss: {}, Loss Parts: [{}]"
+                    desc = desc.format(loss_fmt.format(epoch_loss),
+                                       loss_fmt.format(sum(loss_parts)),
+                                       ", ".join(loss_fmt.format(n.item()) for n in loss_parts))
+                    pbar.set_description(desc)
+                    
+                    del loss, loss_parts
+                    
+                print("Training Loss: {:.4f}".format(epoch_loss))
+                train_loss_info['loss'] = train_loss_record
+            
+            elif epoch_phase == 'test':
+                pass
+            
+            torch.cuda.empty_cache()
+        
+        if save_model:
+            model_weights = model.state_dict()
+            tracker.update_model_weights(epoch,
+                                         model_weights,
+                                         save_best=save_best,
+                                         save_current=save_all)
+            info = {'train_loss_history': train_loss_info}
+        
+        if save_log:
+            tracker.update_info_history(epoch, info)
+        
+        print()
+        
+        if lr_scheduler:
+            lr_scheduler.step()
 
-# shape (batch_size, freq_bins, time_steps)
-# time_steps = sr / hop_length
-# frequency for bin n = freqs[n]
-
-z = spec_layer(x)
-z = torch.log(z)
-
-fig = plt.figure(figsize=(5, 10))
-ax = plt.subplot()
-ax.imshow(z.numpy()[0], cmap='plasma')
-ax.invert_yaxis()
-fig.show()
-
-class CNN:
-    pass
+    time_elapsed = time.time() - start_time
+    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    
+    return tracker
