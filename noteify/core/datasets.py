@@ -288,7 +288,7 @@ class MusicNetDataset:
         start_sample = math.floor(start_sample*factor)
         end_sample = math.ceil(end_sample*factor)
         intervals = self.labels[rec_id][start_sample:end_sample + 1]
-        note_infos = [n.data for n in intervals]
+        note_infos = [n.data.copy() for n in intervals]
         
         factor = self.sample_rate/self.INPUT_SAMPLE_RATE
         for n, info in enumerate(note_infos):
@@ -445,9 +445,8 @@ class MusicNetDatasetProcessed:
         self.raw_dataset = raw_dataset
         self.augmentor = augmentor
         self.rng = np.random.default_rng()
-
-    def __getitem__(self, index):
-        rec_id, start_sample = index
+    
+    def get_processed_data(self, rec_id, start_sample):
         orig_sr = self.raw_dataset.sample_rate
         end_sample = start_sample + SEGMENT_LENGTH*orig_sr
         x, note_infos = self.raw_dataset.get_record_data(
@@ -474,6 +473,12 @@ class MusicNetDatasetProcessed:
 
         roll_info = generate_rolls(note_events, segment_start_time, segment_end_time)
 
+        return x, note_events, roll_info
+
+    def __getitem__(self, index):
+        rec_id, start_sample = index
+        x, _, roll_info = self.get_processed_data(rec_id, start_sample)
+
         return x, roll_info
 
 class MusicNetSampler:
@@ -499,8 +504,9 @@ class MusicNetSampler:
             else:
                 start_time = 0
             rec_length = self.raw_dataset.get_record_length(rec_id)/self.raw_dataset.sample_rate
-            while (start_time + SEGMENT_LENGTH < rec_length):
-                self.segment_infos.append((rec_id, start_time))
+            while (start_time + SEGMENT_LENGTH < (rec_length - 0.01)):
+                start_sample = int(start_time*self.raw_dataset.sample_rate)
+                self.segment_infos.append((rec_id, start_sample))
                 start_time += SEGMENT_LENGTH
         if self.shuffle:
             self.rng.shuffle(self.segment_infos)

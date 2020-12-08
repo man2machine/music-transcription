@@ -157,6 +157,7 @@ class AcousticCRNN(nn.Module):
         x = self.conv_block4(x) # (batch_size, num_channels, num_frames, freq_bins4)
         x = self.pool(x) # (batch_size, num_channels, num_frames, freq_bins5)
 
+        # time_steps = num_frames
         x =  x.transpose(1, 2).flatten(2) # (batch_size, time_steps, channels_num * freq_bins5)
         
         x = self.fc1(x) # (batch_size, time_steps, linear_feats)
@@ -210,6 +211,7 @@ class TranscriptionNN(nn.Module):
         x = self.spec_layer(x) # (batch_size, freq_bins, num_frames)
         x = x.transpose(1, 2)
         x = x.unsqueeze(1) # (batch_size, num_channels, num_frames, freq_bins)
+
         x = x.transpose(1, 3)
         x = self.bn(x) # normalize spectrogram accross frequency
         x = x.transpose(1, 3) # (batch_size, num_channels, num_frames, freq_bins)

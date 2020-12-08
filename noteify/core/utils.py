@@ -40,9 +40,16 @@ def plot_roll_info(roll_info):
         fig = plt.figure(figsize=(10, 4))
         ax = plt.subplot()
         ax.set_title(roll_name)
-        ax.imshow(value.T, interpolation=None, cmap='inferno')
+        ax.imshow(value.T, interpolation=None, cmap='inferno', vmin=0.0, vmax=1.0)
         ax.invert_yaxis()
         fig.show()
+
+def plot_roll(roll):
+    fig = plt.figure(figsize=(10, 4))
+    ax = plt.subplot()
+    ax.imshow(roll.T, interpolation=None, cmap='inferno', vmin=0.0, vmax=1.0)
+    ax.invert_yaxis()
+    fig.show()
 
 def write_events_to_midi(start_time, note_events, midi_path):
     """

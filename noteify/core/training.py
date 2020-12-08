@@ -30,8 +30,9 @@ def make_optimizer(model, lr=0.001, verbose=False):
             if param.requires_grad == True:
                 print("\t", name)
     
-    optimizer = optim.Adam(params_to_update, lr=lr) #, weight_decay=1e-4)
-    nn.utils.clip_grad_norm_(params_to_update, 3.0)
+    optimizer = optim.Adam(params_to_update, lr=lr,
+        eps=1e-08, amsgrad=True)
+    nn.utils.clip_grad_norm_(params_to_update, 8.0)
     
     return optimizer
 
