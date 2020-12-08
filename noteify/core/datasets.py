@@ -445,7 +445,7 @@ class MusicNetDatasetProcessed:
         self.raw_dataset = raw_dataset
         self.augmentor = augmentor
         self.rng = np.random.default_rng()
-
+    
     def __getitem__(self, index):
         rec_id, start_sample = index
         orig_sr = self.raw_dataset.sample_rate
@@ -500,7 +500,8 @@ class MusicNetSampler:
                 start_time = 0
             rec_length = self.raw_dataset.get_record_length(rec_id)/self.raw_dataset.sample_rate
             while (start_time + SEGMENT_LENGTH < rec_length):
-                self.segment_infos.append((rec_id, start_time))
+                start_sample = int(start_time*self.raw_dataset.sample_rate)
+                self.segment_infos.append((rec_id, start_sample))
                 start_time += SEGMENT_LENGTH
         if self.shuffle:
             self.rng.shuffle(self.segment_infos)
