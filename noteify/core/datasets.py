@@ -319,6 +319,8 @@ class MaestroDataset:
                  refresh_cache=False,
                  delete_wav=False,
                  train=True,
+                 test=False,
+                 validation=False,
                  use_mmap=False,
                  numpy_cache=False,
                  numpy_resample_sr=None,
@@ -329,6 +331,8 @@ class MaestroDataset:
         self.refresh_cache = refresh_cache
         self.delete_wav = delete_wav
         self.train = train
+        self.test = test
+        self.validation = validation
         self.use_mmap = use_mmap
         self.numpy_cache = numpy_cache
         self.numpy_resample_sr = numpy_resample_sr
@@ -356,11 +360,14 @@ class MaestroDataset:
                     self.metadata[element_id] = {}
                 self.metadata[element_id][category] = orig_metadata[category][element_id]
     
-        self.all_rec_ids = self.metadata.keys()
+        self.all_rec_ids = list(self.metadata.keys())
+        self.rec_ids = []
         if self.train:
             self.rec_ids = [n for n in self.all_rec_ids if self.metadata[n]['split'] == 'train']
         else:
             self.rec_ids = [n for n in self.all_rec_ids if self.metadata[n]['split'] == 'test']
+        if self.validation:
+            self.rec_ids += [n for n in self.all_rec_ids if self.metadata[n]['split'] == 'validation'] 
         
         if filter_records is not None:
             self.rec_ids = [n for n in self.rec_ids if n in filter_records]
@@ -369,6 +376,7 @@ class MaestroDataset:
             self.rec_ids = self.rec_ids[:int(len(self.rec_ids)/reduce_record_factor)]
 
         if not self.check_processed():
+            print("Processing data")
             self.process_data()
         
         self.records = dict()
@@ -426,7 +434,16 @@ class MaestroDataset:
         return os.path.exists(os.path.join(self.root_dir, "maestro-v3.0.0.json"))
     
     def check_processed(self):
-        return os.path.exists(os.path.join(self.root_dir, "check.json"))
+        check_fname = os.path.join(self.root_dir, "check.json")
+        if os.path.exists(check_fname):
+            with open(check_fname, 'r') as f:
+                check = json.load(f)
+            processed_ids = check['processed_ids']
+            for rec_id in self.rec_ids:
+                if rec_id not in processed_ids:
+                    return False
+            return True
+        return False
     
     def get_record_length(self, rec_id):
         return self.metadata[rec_id]['duration']
@@ -443,7 +460,7 @@ class MaestroDataset:
 
             bin_fname = os.path.join(self.root_dir, bin_fname)
             exist = os.path.exists(bin_fname)
-            if not exist or (exist and os.path.getsize(bin_fname) > 0):
+            if not exist or (exist and os.path.getsize(bin_fname) == 0):
                 data, sr = librosa.core.load(os.path.join(self.root_dir, audio_fname),
                     mono=True, sr=self.BIN_SAMPLE_RATE)
                 data.tofile(bin_fname)
@@ -451,24 +468,39 @@ class MaestroDataset:
         pbar = tqdm(self.rec_ids)
         for rec_id in pbar:
             midi_fname = self.metadata[rec_id]['midi_filename']
+            audio_fname = self.metadata[rec_id]['audio_filename']
             events_fname = audio_fname[:-4]+'_events.pckl'
             tree_fname = audio_fname[:-4]+'_tree.pckl'
             pbar.set_description(midi_fname)
 
-            event_info, tree_info = self.get_label_info(midi_fname)
+            midi_fname = os.path.join(self.root_dir, midi_fname)
 
             events_fname = os.path.join(self.root_dir, events_fname)
-            if not os.path.exists(events_fname):
+            event_exist = os.path.exists(events_fname)
+            tree_fname = os.path.join(self.root_dir, tree_fname)
+            tree_exist = os.path.exists(tree_fname)
+
+            if (not event_exist) or (not tree_exist):
+                event_info, tree_info = self.get_label_info(midi_fname)
+            
+            if not event_exist:
                 with open(events_fname, 'wb') as f:
                     pickle.dump(event_info, f)
             
-            tree_fname = os.path.join(self.root_dir, tree_fname)
-            if not os.path.exists(tree_fname):
+            if not tree_exist:
                 with open(tree_fname, 'wb') as f:
                     pickle.dump(tree_info, f)
-
-        with open(os.path.join(self.root_dir, "check.json")) as f:
-            json.dump({}, f)
+        
+        check_fname = os.path.join(self.root_dir, "check.json")
+        processed_ids = set(self.rec_ids)
+        if os.path.exists(check_fname):
+            with open(check_fname, 'r') as f:
+                check = json.load(f)
+            processed_ids.update(check['processed_ids'])
+        
+        check = {'processed_ids': list(processed_ids)}
+        with open(check_fname, 'w') as f:
+            json.dump(check, f)
     
     def read_midi(self, midi_fname):
         midi_file = mido.MidiFile(midi_fname)
@@ -539,7 +571,7 @@ class MaestroDataset:
         
         return ex_note_events
     
-    def parse_midi(self, midi_info):
+    def parse_midi(self, midi_info, extend_pedal=True):
         midi_events = midi_info['midi_events']
         midi_event_times = midi_info['midi_event_times']
         start_time = min(midi_event_times)
@@ -572,7 +604,7 @@ class MaestroDataset:
                         note_buffer.pop(midi_note)
             
             elif event.type == 'control_change' and event.control == 64:
-                pedal_value = event.ValueError
+                pedal_value = event.value
                 if pedal_value >= 64:
                     if 'onset_time' not in pedal_buffer:
                         pedal_buffer['onset_time'] = event_time
@@ -645,7 +677,7 @@ class MaestroDataset:
         with open(tree_fname, 'rb') as f:
             tree = pickle.load(f)
         
-        intervals = tree[start_sample:end_sample + 1]
+        intervals = tree['note_tree'][start_sample:end_sample + 1]
         note_events = [n.data.copy() for n in intervals]
 
         return x, note_events
@@ -682,8 +714,8 @@ class MusicAugmentor:
             aug_x = aug_x[:clip_samples]
         aug_x = aug_x.copy()
 
-        if self.noise:
-            aug_x += self.rng.normal(0, self.rng.uniform(0, 0.01), len(aug_x))
+        if self.noise and self.rng.uniform(0, 1) > 0.7:
+            aug_x += self.rng.normal(0, self.rng.uniform(0, 0.0014), len(aug_x))
 
         return aug_x
 
@@ -874,7 +906,7 @@ class MaestroDatasetProcessed:
 
         return x, roll_info
 
-class MusicDataSampler:
+class MusicSegmentSampler:
     def __init__(self, proc_dataset, batch_size, num_batches=None, shuffle=True, random_start_times=False):
         self.proc_dataset = proc_dataset
         self.raw_dataset = proc_dataset.raw_dataset
@@ -928,7 +960,7 @@ def music_data_collate_fn(unbatched_data):
         batched_targets[key] = torch.tensor(np.stack([n[1][key] for n in unbatched_data]), dtype=torch.float)
     return batched_inputs, batched_targets
 
-def get_musicnet_dataloader(proc_dataset, sampler, num_workers=None, pin_memory=False):
+def get_music_dataloader(proc_dataset, sampler, num_workers=None, pin_memory=False):
     if num_workers is not None:
         dataloader = torch_data.DataLoader(
             dataset=proc_dataset,

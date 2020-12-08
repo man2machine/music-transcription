@@ -95,7 +95,6 @@ def train_model(
     save_all=False,
     save_log=False,
     num_epochs=1,
-    test_batch_interval=None,
     train_batch_multiplier=1):
     
     start_time = time.time()
@@ -105,6 +104,11 @@ def train_model(
     train_batch_multiplier = int(train_batch_multiplier)
 
     epoch_phases = ['train', 'test']
+    
+    def test_stats():
+        dataloaders['test'].batch_sampler.generate_segments()
+        stats = get_evaluation_stats(model, dataloaders['test'], device)
+        print("Test statistics:", stats)
     
     for epoch in range(num_epochs):
         print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -123,7 +127,6 @@ def train_model(
                 running_loss = 0.0   
                 running_count = 0
                 batch_step_count = 0
-                batch_num = 0
                 
                 train_loss_record = []
                 pbar = tqdm(dataloaders['train'])
@@ -169,19 +172,13 @@ def train_model(
                     pbar.set_description(desc)
                     
                     del loss, loss_parts
-
-                    batch_num += 1
-                    if test_batch_interval and ((batch_num % test_batch_interval) == 0):
-                        stats = get_evaluation_stats(model, dataloaders['test'], device)
-                        print("Test statistics:", stats)
                 pbar.close()
 
                 print("Training Loss: {:.4f}".format(epoch_loss))
                 train_loss_info['loss'] = train_loss_record
             
-            elif epoch_phase == 'test' and test_batch_interval is None:
-                stats = get_evaluation_stats(model, dataloaders['test'], device)
-                print("Test statistics:", stats)
+            elif epoch_phase == 'test':
+                test_stats()
             
             torch.cuda.empty_cache()
         

@@ -121,12 +121,12 @@ class AcousticCRNN(nn.Module):
         #     kernel2_size=(9, 1),
         #     padding2_size=(4, 0)
         # )
-        self.conv_block3 = BasicConvBlock(in_channels=32, out_channels=48)
-        self.conv_block4 = BasicConvBlock(in_channels=48, out_channels=64)
+        self.conv_block3 = BasicConvBlock(in_channels=32, out_channels=64)
+        self.conv_block4 = BasicConvBlock(in_channels=64, out_channels=96)
 
         self.pool = nn.AvgPool2d(kernel_size=(1, 2))
 
-        self.num_conv_feats = 64 * (NUM_BINS//16)
+        self.num_conv_feats = 96 * (NUM_BINS//16)
         self.linear_feats = 768
         self.rnn_feats = 256
 
@@ -237,9 +237,6 @@ class TranscriptionNN(nn.Module):
         
         return outputs
 
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 if __name__ == '__main__':
     from torchsummary import summary
     model = AcousticCRNN()
@@ -247,4 +244,3 @@ if __name__ == '__main__':
 
     model = TranscriptionNN()
     summary(model, (SEGMENT_SAMPLES,), device="cpu")
-    

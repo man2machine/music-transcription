@@ -44,10 +44,10 @@ def plot_roll_info(roll_info):
         ax.invert_yaxis()
         fig.show()
 
-def plot_roll(roll):
+def plot_roll(roll, vmin=0, vmax=1.0):
     fig = plt.figure(figsize=(10, 4))
     ax = plt.subplot()
-    ax.imshow(roll.T, interpolation=None, cmap='inferno', vmin=0.0, vmax=1.0)
+    ax.imshow(roll.T, interpolation=None, cmap='inferno', vmin=vmin, vmax=vmax)
     ax.invert_yaxis()
     fig.show()
 

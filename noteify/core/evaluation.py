@@ -115,7 +115,7 @@ def masked_average_error(target, output, mask):
         output *= mask
         return torch.sum(torch.abs(target - output)) / torch.clamp(torch.sum(mask), min=1e-8)
 
-def get_evaluation_stats(model, dataloader, device):
+def get_evaluation_stats(model, dataloader, device, max_iter=10),:
     stats = {}
     
     result = get_model_outputs(model,
@@ -123,7 +123,7 @@ def get_evaluation_stats(model, dataloader, device):
                                device,
                                return_targets=True,
                                apply_sigmoid=True,
-                               max_iter=10)
+                               max_iter=max_iter)
     targets = result['targets']
     outputs = result['outputs']
 
