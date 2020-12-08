@@ -373,6 +373,7 @@ class MaestroDataset:
         
         self.records = dict()
         self.open_files = []
+        self.sample_rate = self.BIN_SAMPLE_RATE
 
         print("Loading audio")
         for rec_id in tqdm(self.rec_ids):
@@ -409,6 +410,18 @@ class MaestroDataset:
                     bin_fname, tree_fname, events_fname)
                 f.close()
     
+    def close(self):
+        if self.use_mmap:
+            for mm in self.records.values():
+                mm[0].close()
+            for fd in self.open_files:
+                os.close(fd)
+            self.records = dict()
+            self.open_files = []
+
+    def __close__(self):
+        self.close()
+
     def check_dataset_exists(self):
         return os.path.exists(os.path.join(self.root_dir, "maestro-v3.0.0.json"))
     
@@ -445,12 +458,14 @@ class MaestroDataset:
             event_info, tree_info = self.get_label_info(midi_fname)
 
             events_fname = os.path.join(self.root_dir, events_fname)
-            with open(events_fname, 'wb') as f:
-                pickle.dump(event_info, f)
+            if not os.path.exists(events_fname):
+                with open(events_fname, 'wb') as f:
+                    pickle.dump(event_info, f)
             
             tree_fname = os.path.join(self.root_dir, tree_fname)
-            with open(tree_fname, 'wb') as f:
-                pickle.dump(tree_info, f)
+            if not os.path.exists(tree_fname):
+                with open(tree_fname, 'wb') as f:
+                    pickle.dump(tree_info, f)
 
         with open(os.path.join(self.root_dir, "check.json")) as f:
             json.dump({}, f)
@@ -537,8 +552,8 @@ class MaestroDataset:
         pedal_buffer = {}
 
         for i in range(len(midi_events)):
-            event = midi_events[n]
-            event_time = midi_event_times[n]
+            event = midi_events[i]
+            event_time = midi_event_times[i]
             if event.type == 'note_on' or event.type == 'note_off':
                 midi_note = event.note
                 velocity = event.velocity
@@ -595,12 +610,12 @@ class MaestroDataset:
 
         for note_event in note_events:
             start_sample = math.floor(note_event['onset_time']*self.BIN_SAMPLE_RATE)
-            end_sample = math.floor(note_event['offnset_time']*self.BIN_SAMPLE_RATE)
+            end_sample = math.floor(note_event['offset_time']*self.BIN_SAMPLE_RATE)
             note_tree[start_sample:end_sample] = note_event
         
         for pedal_event in pedal_events:
             start_sample = math.floor(pedal_event['onset_time']*self.BIN_SAMPLE_RATE)
-            end_sample = math.floor(pedal_event['offnset_time']*self.BIN_SAMPLE_RATE)
+            end_sample = math.floor(pedal_event['offset_time']*self.BIN_SAMPLE_RATE)
             pedal_tree[start_sample:end_sample] = pedal_events
         
         event_info = {'note_events': note_events, 'pedal_events': pedal_events}
@@ -816,7 +831,50 @@ class MusicNetDatasetProcessed:
 
         return x, roll_info
 
-class MusicNetSampler:
+class MaestroDatasetProcessed:
+    def __init__(self, raw_dataset, augmentor=None):
+        self.raw_dataset = raw_dataset
+        self.augmentor = augmentor
+        self.rng = np.random.default_rng()
+    
+    def get_processed_data(self, rec_id, start_sample):
+        orig_sr = self.raw_dataset.sample_rate
+        end_sample = start_sample + SEGMENT_LENGTH*orig_sr
+        x, note_events = self.raw_dataset.get_record_data(
+            rec_id,
+            start_sample=start_sample,
+            end_sample=end_sample)
+        
+        if orig_sr != SAMPLE_RATE:
+            x = librosa.resample(x, orig_sr, SAMPLE_RATE)
+        assert len(x) == SEGMENT_SAMPLES
+
+        if self.augmentor:
+            x = self.augmentor.augment(x)
+
+        segment_start_time = start_sample/orig_sr
+        segment_end_time = segment_start_time + SEGMENT_LENGTH
+
+        if orig_sr != SAMPLE_RATE:
+            new_note_events = []
+            for event in note_events:
+                event = event.copy()
+                event['onset_time'] *= SAMPLE_RATE/orig_sr
+                event['offset_time'] *= SAMPLE_RATE/orig_sr
+                new_note_events.append(event)
+            note_events = new_note_events
+
+        roll_info = generate_rolls(note_events, segment_start_time, segment_end_time)
+
+        return x, note_events, roll_info
+
+    def __getitem__(self, index):
+        rec_id, start_sample = index
+        x, _, roll_info = self.get_processed_data(rec_id, start_sample)
+
+        return x, roll_info
+
+class MusicDataSampler:
     def __init__(self, proc_dataset, batch_size, num_batches=None, shuffle=True, random_start_times=False):
         self.proc_dataset = proc_dataset
         self.raw_dataset = proc_dataset.raw_dataset
