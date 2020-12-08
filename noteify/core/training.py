@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
-from noteify.core.evaluation import targets_to_device, get_model_outputs
+from noteify.core.evaluation import targets_to_device
 from noteify.core.losses import compute_transcription_losses
 from noteify.core.evaluation import get_evaluation_stats
 

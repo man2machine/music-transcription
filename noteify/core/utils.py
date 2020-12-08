@@ -23,8 +23,8 @@ def load_wavfile(fname, resample_sr=SAMPLE_RATE):
 def plot_audio(x):
     fig = plt.figure(figsize=(10, 4))
     ax = plt.subplot()
-    ax.set_xlabel("Amplitude")
-    ax.set_ylabel("Samples")
+    ax.set_xlabel("Samples")
+    ax.set_ylabel("Amplitude")
     ax.plot(np.arange(0, len(x)), x)
     fig.show()
 

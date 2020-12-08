@@ -111,22 +111,22 @@ class AcousticCRNN(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.conv_block1 = BasicConvBlock(in_channels=1, out_channels=48)
-        self.conv_block2 = BasicConvBlock(in_channels=48, out_channels=64)
+        self.conv_block1 = BasicConvBlock(in_channels=1, out_channels=24)
+        self.conv_block2 = BasicConvBlock(in_channels=24, out_channels=32)
         self.res_conv_block2 = ResNetFreqConvBlock(
-            in_channels=64,
-            out_channels=64,
+            in_channels=32,
+            out_channels=32,
             kernel1_size=(1, NUM_BINS//4 + 1),
             padding1_size=(0, NUM_BINS//8),
             kernel2_size=(9, 1),
             padding2_size=(4, 0)
         )
-        self.conv_block3 = BasicConvBlock(in_channels=64, out_channels=96)
-        self.conv_block4 = BasicConvBlock(in_channels=96, out_channels=128)
+        self.conv_block3 = BasicConvBlock(in_channels=32, out_channels=48)
+        self.conv_block4 = BasicConvBlock(in_channels=48, out_channels=64)
 
         self.pool = nn.AvgPool2d(kernel_size=(1, 2))
 
-        self.num_conv_feats = 128 * (NUM_BINS//16)
+        self.num_conv_feats = 64 * (NUM_BINS//16)
         self.linear_feats = 768
         self.rnn_feats = 256
 
@@ -243,8 +243,8 @@ def count_parameters(model):
 if __name__ == '__main__':
     from torchsummary import summary
     model = AcousticCRNN()
-    summary(model, (1, SEGMENT_FRAMES, NUM_BINS))
+    summary(model, (1, SEGMENT_FRAMES, NUM_BINS), device="cpu")
 
     model = TranscriptionNN()
-    summary(model, (SEGMENT_SAMPLES,))
+    summary(model, (SEGMENT_SAMPLES,), device="cpu")
     

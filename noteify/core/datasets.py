@@ -9,6 +9,7 @@ import os
 import mmap
 import pickle
 import errno
+import math
 import csv
 import subprocess
 import tarfile
@@ -21,6 +22,7 @@ import librosa
 import sox
 from scipy.io import wavfile
 from intervaltree import IntervalTree
+from tqdm import tqdm
 
 from noteify.core.config import (
     SAMPLE_RATE, HOP_LENGTH, NUM_NOTES, MIN_MIDI,
@@ -30,7 +32,8 @@ from noteify.core.config import (
 SIZE_FLOAT = 4 # size of a float
 
 class MusicNetDataset:
-    URL = "https://homes.cs.washington.edu/~thickstn/media/musicnet.tar.gz"
+    DATA_URL = "https://homes.cs.washington.edu/~thickstn/media/musicnet.tar.gz"
+    METADATA_URL = "https://homes.cs.washington.edu/~thickstn/media/musicnet_metadata.csv"
     RAW_FOLDER = "raw"
     TRAIN_DATA_DIR = "train_data"
     TRAIN_LABELS_DIR = "train_labels"
@@ -39,21 +42,35 @@ class MusicNetDataset:
     TEST_LABELS_DIR = "test_labels"
     TEST_TREE_FNAME = "test_tree.pckl"
     EXTRACTED_FOLDERS = [TRAIN_DATA_DIR, TRAIN_LABELS_DIR, TEST_DATA_DIR, TEST_LABELS_DIR]
-    SAMPLE_RATE = 44100
+    INPUT_SAMPLE_RATE = 44100
+    BIN_SAMPLE_RATE = SAMPLE_RATE
 
     def __init__(self,
                  data_dir,
                  download=False,
                  refresh_cache=False,
-                 delete_wav=True,
+                 delete_wav=False,
                  train=True,
-                 mmap=False):
+                 use_mmap=False,
+                 numpy_cache=False,
+                 numpy_resample_sr=None,
+                 piano_only=False,
+                 filter_records=None):
 
         self.root_dir = os.path.abspath(os.path.expanduser(data_dir))
         self.refresh_cache = refresh_cache
         self.delete_wav = delete_wav
         self.train = train
-        self.mmap = mmap
+        self.use_mmap = use_mmap
+        self.numpy_cache = numpy_cache
+        self.numpy_resample_sr = numpy_resample_sr
+        
+        self.sample_rate = self.BIN_SAMPLE_RATE
+        if self.numpy_resample_sr:
+            assert numpy_cache
+            self.sample_rate = self.numpy_resample_sr
+        self.piano_only = piano_only
+        self.filter_records = filter_records
 
         found_data = False
         if download:
@@ -76,26 +93,54 @@ class MusicNetDataset:
         with open(labels_path, 'rb') as f:
             self.labels = pickle.load(f)
 
-        self.rec_ids = list(self.labels.keys())
+        self.rec_ids = []
         self.records = dict()
         self.open_files = []
+        
+        if self.piano_only:
+            with open(os.path.join(self.root_dir, "musicnet_metadata.csv")) as f:
+                data = f.read().split('\n')[1:-1]
 
-        for record in os.listdir(self.data_path):
+            data = [n.split(",") for n in data]
+            piano_records = []
+            for item in data:
+                rec_id = int(item[0])
+                has_piano = "piano" in item[4].lower()
+                if has_piano:
+                    piano_records.append(rec_id)
+            self.filter_records = piano_records
+
+        print("Loading audio")
+        for record in tqdm(os.listdir(self.data_path)):
             if not record.endswith('.bin'):
                 continue
-            if self.mmap:
-                fd = os.open(os.path.join(self.data_path, record), os.O_RDONLY)
-                buf = mmap.mmap(fd, 0, mmap.MAP_SHARED, mmap.PROT_READ)
-                self.records[int(record[:-4])] = (buf, len(buf)//SIZE_FLOAT)
+            rec_id = int(record[:-4])
+            if self.filter_records is not None:
+                if rec_id not in self.filter_records:
+                    continue
+            self.rec_ids.append(rec_id)
+
+            fname = os.path.join(self.data_path, record)
+            if self.use_mmap:
+                fd = os.open(fname, os.O_RDONLY)
+                buf = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+                self.records[rec_id] = (buf, len(buf)//SIZE_FLOAT)
                 self.open_files.append(fd)
+            if self.numpy_cache:
+                f = open(fname, 'rb')
+                x = np.fromfile(f, dtype=np.float32)
+                if self.numpy_resample_sr:
+                    x = librosa.resample(x, self.INPUT_SAMPLE_RATE, self.sample_rate)
+                self.records[rec_id] = (x, len(x))
+                f.close()
             else:
-                f = open(os.path.join(self.data_path, record))
+                f = open(fname)
                 self.records[int(record[:-4])] = (os.path.join(self.data_path, record),
                                                   os.fstat(f.fileno()).st_size//SIZE_FLOAT)
                 f.close()
 
     def close(self):
-        if self.mmap:
+        if self.use_mmap:
             for mm in self.records.values():
                 mm[0].close()
             for fd in self.open_files:
@@ -123,11 +168,11 @@ class MusicNetDataset:
         os.makedirs(os.path.join(self.root_dir,
                                  self.RAW_FOLDER), exist_ok=True)
 
-        filename = self.URL.rpartition('/')[2]
+        filename = self.DATA_URL.rpartition('/')[2]
         file_path = os.path.join(self.root_dir, self.RAW_FOLDER, filename)
         if not os.path.exists(file_path):
-            print("Downloading", self.URL)
-            data = urllib.request.urlopen(self.URL)
+            print("Downloading", self.DATA_URL)
+            data = urllib.request.urlopen(self.DATA_URL)
             with open(file_path, 'wb') as f:
                 # stream the download to disk
                 while True:
@@ -142,7 +187,20 @@ class MusicNetDataset:
             print("Extracting", filename)
             if subprocess.call(["tar", "-xf", file_path, '-C', self.root_dir, '--strip', '1']) != 0:
                 raise OSError("Failed tarball extraction")
-
+        
+        filename = self.METADATA_URL.rpartition('/')[2]
+        file_path = os.path.join(self.root_dir, filename)
+        if not os.path.exists(file_path):
+            print("Downloading", self.METADATA_URL)
+            data = urllib.request.urlopen(self.METADATA_URL)
+            with open(file_path, 'wb') as f:
+                # stream the download to disk
+                while True:
+                    chunk = data.read(16*1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        
         print("Processing")
 
         self.process_data(self.TEST_DATA_DIR)
@@ -162,18 +220,20 @@ class MusicNetDataset:
     
     def process_data(self, path):
         sub_dir = os.path.join(self.root_dir, path)
-        for item in os.listdir(sub_dir):
+        for item in tqdm(os.listdir(sub_dir)):
             if not item.endswith('.wav'):
                 continue
             sr, data = wavfile.read(os.path.join(self.root_dir, path, item))
-            assert sr == self.SAMPLE_RATE
+            assert sr == self.INPUT_SAMPLE_RATE
+            if self.BIN_SAMPLE_RATE != self.INPUT_SAMPLE_RATE:
+                data = librosa.resample(data, self.INPUT_SAMPLE_RATE, self.BIN_SAMPLE_RATE)
             data.tofile(os.path.join(self.root_dir, path, item[:-4]+'.bin'))
             if self.delete_wav:
                 os.remove(os.path.join(sub_dir, item))
     
     def process_labels(self, path):
         trees = dict()
-        for item in os.listdir(os.path.join(self.root_dir, path)):
+        for item in tqdm(os.listdir(os.path.join(self.root_dir, path))):
             if not item.endswith('.csv'):
                 continue
             rec_id = int(item[:-4])
@@ -181,21 +241,21 @@ class MusicNetDataset:
             with open(os.path.join(self.root_dir, path, item), 'r') as f:
                 reader = csv.DictReader(f, delimiter=',')
                 for label in reader:
-                    start_time = int(label['start_time'])
-                    end_time = int(label['end_time'])
+                    start_sample = int(label['start_time'])
+                    end_sample = int(label['end_time'])
                     instrument = int(label['instrument'])
                     note = int(label['note'])
                     start_beat = float(label['start_beat'])
                     end_beat = float(label['end_beat'])
                     note_value = label['note_value']
-                    tree[start_time:end_time] = {
-                        'start_time': start_time,
-                        'end_time': end_time,
+                    tree[start_sample:end_sample] = {
+                        'start_sample': start_sample,
+                        'end_sample': end_sample,
                         'instrument': instrument,
                         'note': note,
                         'start_beat': start_beat,
                         'end_beat': end_beat,
-                        'note_value': note_value,
+                        'note_value': note_value
                     }
             trees[rec_id] = tree
         return trees
@@ -211,20 +271,29 @@ class MusicNetDataset:
         if start_sample is None:
             start_sample = 0
         if end_sample is None:
-            end_sample = self.records[rec_id][1]*SIZE_FLOAT
-
+            end_sample = self.records[rec_id][1]
+        
         start_pos = int(start_sample)*SIZE_FLOAT
         end_pos = int(end_sample)*SIZE_FLOAT
-        if self.mmap:
-            x = np.frombuffer(
-                self.records[rec_id][0][start_pos:end_pos], dtype=np.float32).copy()
+        if self.use_mmap:
+            x = np.frombuffer(self.records[rec_id][0][start_pos:end_pos], dtype=np.float32).copy()
+        elif self.numpy_cache:
+            x = self.records[rec_id][0][start_sample:end_sample].copy()
         else:
             with open(self.records[rec_id][0], 'rb') as f:
-                x = np.fromfile(f, dtype=np.float32,
-                                count=(end_sample - start_sample))
-
+                f.seek(start_pos, os.SEEK_SET)
+                x = np.fromfile(f, dtype=np.float32, count=(end_sample - start_sample))
+        
+        factor = self.INPUT_SAMPLE_RATE/self.sample_rate
+        start_sample = math.floor(start_sample*factor)
+        end_sample = math.ceil(end_sample*factor)
         intervals = self.labels[rec_id][start_sample:end_sample + 1]
         note_infos = [n.data for n in intervals]
+        
+        factor = self.sample_rate/self.INPUT_SAMPLE_RATE
+        for n, info in enumerate(note_infos):
+            note_infos[n]['start_sample'] = info['start_sample']*factor
+            note_infos[n]['end_sample'] = info['end_sample']*factor
 
         return x, note_infos
 
@@ -307,7 +376,7 @@ def get_regression(reg_input):
 
     return output
 
-def generate_rolls(note_events, start_time):
+def generate_rolls(note_events, start_time, end_time):
     frame_roll = np.zeros((SEGMENT_FRAMES, NUM_NOTES))
     onset_roll = np.zeros((SEGMENT_FRAMES, NUM_NOTES))
     offset_roll = np.zeros((SEGMENT_FRAMES, NUM_NOTES))
@@ -323,11 +392,15 @@ def generate_rolls(note_events, start_time):
         if 0 <= note_index <= NUM_NOTES:
             onset_time = note_event['onset_time']
             offset_time = note_event['offset_time']
+
+            if onset_time > end_time:
+                continue
+
             start_frame = int(
                 round((onset_time - start_time)*FRAMES_PER_SECOND))
             end_frame = int(
                 round((offset_time - start_time)*FRAMES_PER_SECOND))
-
+            
             if end_frame >= 0:
                 clip_start_frame = max(start_frame, 0)
 
@@ -350,8 +423,7 @@ def generate_rolls(note_events, start_time):
                         (onset_time - start_time) - (start_frame/FRAMES_PER_SECOND)
                 else:
                     mask_roll[:end_frame + 1, note_index] = 0
-
-            
+    
     for n in range(NUM_NOTES):
         reg_onset_roll[:, n] = get_regression(reg_onset_roll[:, n])
         reg_offset_roll[:, n] = get_regression(reg_offset_roll[:, n])
@@ -376,29 +448,31 @@ class MusicNetDatasetProcessed:
 
     def __getitem__(self, index):
         rec_id, start_sample = index
-        orig_sr = self.raw_dataset.SAMPLE_RATE
+        orig_sr = self.raw_dataset.sample_rate
         end_sample = start_sample + SEGMENT_LENGTH*orig_sr
         x, note_infos = self.raw_dataset.get_record_data(
             rec_id,
             start_sample=start_sample,
             end_sample=end_sample)
-
-        x = librosa.resample(x, orig_sr, SAMPLE_RATE)
+        
+        if orig_sr != SAMPLE_RATE:
+            x = librosa.resample(x, orig_sr, SAMPLE_RATE)
         assert len(x) == SEGMENT_SAMPLES
 
         if self.augmentor:
             x = self.augmentor.augment(x)
 
         segment_start_time = start_sample/orig_sr
+        segment_end_time = segment_start_time + SEGMENT_LENGTH
         note_events = []
         for note_info in note_infos:
             note_events.append(create_note_event(
                 note_info['note'],
-                note_info['start_time']/orig_sr,
-                note_info['end_time']/orig_sr
-            ))
+                note_info['start_sample']/orig_sr,
+                note_info['end_sample']/orig_sr)
+            )
 
-        roll_info = generate_rolls(note_events, segment_start_time)
+        roll_info = generate_rolls(note_events, segment_start_time, segment_end_time)
 
         return x, roll_info
 
@@ -424,7 +498,7 @@ class MusicNetSampler:
                 start_time = np.random.uniform(0, SEGMENT_LENGTH)
             else:
                 start_time = 0
-            rec_length = self.raw_dataset.get_record_length(rec_id)/self.raw_dataset.SAMPLE_RATE
+            rec_length = self.raw_dataset.get_record_length(rec_id)/self.raw_dataset.sample_rate
             while (start_time + SEGMENT_LENGTH < rec_length):
                 self.segment_infos.append((rec_id, start_time))
                 start_time += SEGMENT_LENGTH
@@ -433,7 +507,7 @@ class MusicNetSampler:
     
     def __iter__(self):
         segment_index = 0
-        for _ in range(num_batches):
+        for _ in range(self.num_batches):
             batch_indices = self.segment_infos[segment_index:segment_index+self.batch_size]
             yield batch_indices
 
@@ -449,42 +523,25 @@ class MusicNetSampler:
         return self.num_batches
 
 def music_data_collate_fn(unbatched_data):
-    batched_inputs = torch.tensor(np.stack([n[0] for n in unbatched_data]))
+    batched_inputs = torch.tensor(np.stack([n[0] for n in unbatched_data]), dtype=torch.float)
     batched_targets = {}
     for key in unbatched_data[0][1].keys():
-        batched_targets[key] = torch.tensor(np.stack([n[1][key] for n in unbatched_data]))
+        batched_targets[key] = torch.tensor(np.stack([n[1][key] for n in unbatched_data]), dtype=torch.float)
     return batched_inputs, batched_targets
 
-def get_musicnet_dataloader(proc_dataset, sampler, num_workers=4):
+def get_musicnet_dataloader(proc_dataset, sampler, num_workers=None, pin_memory=False):
     if num_workers is not None:
         dataloader = torch_data.DataLoader(
             dataset=proc_dataset,
             batch_sampler=sampler,
             collate_fn=music_data_collate_fn,
             num_workers=num_workers,
-            pin_memory=False)
+            pin_memory=pin_memory)
     else:
         dataloader = torch_data.DataLoader(
             dataset=proc_dataset,
             batch_sampler=sampler,
             collate_fn=music_data_collate_fn,
-            pin_memory=False)
+            pin_memory=pin_memory)
     
     return dataloader
-
-def get_musicnet_data(data_dir, batch_size):
-    raw_dataset_train = MusicNetDataset(data_dir, download=True, train=True)
-    raw_dataset_test = MusicNetDataset(data_dir, download=True, train=False)
-
-    dataset_train = MusicNetDatasetProcessed(raw_dataset_train, augmentor=MusicAugmentor())
-    sampler_train = MusicNetSampler(dataset_train, batch_size)
-    dataloader_train = get_musicnet_dataloader(dataset_train, sampler_train)
-
-    dataset_test = MusicNetDatasetProcessed(raw_dataset_test)
-    sampler_test = MusicNetSampler(dataset_test, batch_size)
-    dataloader_test = get_musicnet_dataloader(dataset_test, sampler_test)
-
-    datasets = {'train': dataset_train, 'test': dataset_test}
-    dataloaders = {'train': dataloader_train, 'test': dataloader_test}
-
-    return datasets, dataloaders

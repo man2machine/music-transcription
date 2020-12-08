@@ -11,9 +11,9 @@ import collections
 import numpy as np
 from sklearn import metrics
 import torch
+from tqdm import tqdm
 
-from noteify.core.config import (SAMPLE_RATE, BINS_PER_OCTAVE, NUM_NOTES, NUM_BINS,
-                                 HOP_LENGTH, SEGMENT_SAMPLES, SEGMENT_FRAMES, EPSILON,
+from noteify.core.config import (NUM_NOTES, SEGMENT_SAMPLES,
                                  FRAMES_PER_SECOND, MIN_MIDI)
 from noteify.core.datasets import create_note_event
 
@@ -21,11 +21,22 @@ def targets_to_device(targets, device):
     for key, value in targets.items():
         targets[key] = value.to(device)
 
-def get_model_outputs(model, dataloader, device, return_inputs=False, return_targets=False):
+def get_model_outputs(model,
+                      dataloader,
+                      device,
+                      pbar=False,
+                      max_iter=None,
+                      return_inputs=False,
+                      return_targets=False,
+                      apply_sigmoid=False):
+    
     inputs = []
     targets = collections.defaultdict(list)
     outputs = collections.defaultdict(list)
-
+    
+    n = 0
+    if pbar:
+        dataloader = tqdm(dataloader)
     for batch_inputs, batch_targets in dataloader:
         if return_inputs:
             inputs.append(batch_inputs)
@@ -33,25 +44,31 @@ def get_model_outputs(model, dataloader, device, return_inputs=False, return_tar
 
         if return_targets:
             for key, value in batch_targets.items():
-                targets[key].append(value.detach().cpu().numpy())
+                targets[key].append(value.detach().cpu())
         
         with torch.set_grad_enabled(False):
             model.eval()
-            batch_outputs = model(batch_inputs)
+            batch_outputs = model(batch_inputs, apply_sigmoid=apply_sigmoid)
 
         for key, value in batch_outputs.items():
-            outputs[key].append(value.detach().cpu().numpy())
+            outputs[key].append(value.detach().cpu())
+        
+        n += 1
+        if max_iter is not None and n >= max_iter:
+            break
+    if pbar:
+        dataloader.close()
     
     targets = dict(targets)
     outputs = dict(outputs)
     
     if return_inputs:
-        inputs = np.concatenate(inputs, axis=0)
+        inputs = torch.cat(inputs, dim=0)
     if return_targets:
         for key in targets:
-            targets[key] = np.concatenate(targets[key], axis=0)
+            targets[key] = torch.cat(targets[key], dim=0)
     for key in outputs:
-        outputs[key] = np.concatenate(outputs[key], axis=0)
+        outputs[key] = torch.cat(outputs[key], dim=0)
     
     result = {
         'inputs': inputs,
@@ -61,7 +78,12 @@ def get_model_outputs(model, dataloader, device, return_inputs=False, return_tar
     
     return result
 
-def get_model_predictions(model, inputs, device, batch_size):
+def get_model_predictions(model,
+                          inputs,
+                          device,
+                          batch_size,
+                          apply_sigmoid=False):
+    
     outputs = collections.defaultdict(list)
 
     index = 0
@@ -70,7 +92,7 @@ def get_model_predictions(model, inputs, device, batch_size):
 
         with torch.set_grad_enabled(False):
             model.eval()
-            batch_outputs = model(batch_inputs)
+            batch_outputs = model(batch_inputs, apply_sigmoid=True)
         
         for key, value in batch_outputs.items():
             outputs[key].append(value.detach().cpu().numpy())
@@ -87,16 +109,21 @@ def masked_average_error(target, output, mask):
     Inputs are numpy arrays all of same shape
     """
     if mask is None:
-        return np.mean(np.abs(target - output))
+        return torch.mean(torch.abs(target - output))
     else:
         target *= mask
         output *= mask
-        return np.sum(np.abs(target - output)) / np.clip(np.sum(mask), 1e-8, np.inf)
+        return torch.sum(torch.abs(target - output)) / torch.clamp(torch.sum(mask), min=1e-8)
 
 def get_evaluation_stats(model, dataloader, device):
     stats = {}
     
-    result = get_model_outputs(model, dataloader, device, return_targets=True)
+    result = get_model_outputs(model,
+                               dataloader,
+                               device,
+                               return_targets=True,
+                               apply_sigmoid=True,
+                               max_iter=10)
     targets = result['targets']
     outputs = result['outputs']
 
@@ -104,29 +131,37 @@ def get_evaluation_stats(model, dataloader, device):
     if 'frame_output' in outputs.keys():
         stats['frame_avg_precision'] = metrics.average_precision_score(
             targets['frame_roll'].flatten(), 
-            outputs['frame_output'].flatten(), average='macro')
+            outputs['frame_output'].flatten(),
+            average='macro')
     
     if 'onset_output' in outputs.keys():
         stats['onset_macro_avg_precision'] = metrics.average_precision_score(
             targets['onset_roll'].flatten(), 
-            outputs['onset_output'].flatten(), average='macro')
+            outputs['onset_output'].flatten(),
+            average='macro')
 
     if 'offset_output' in outputs.keys():
         stats['offset_avg_precision'] = metrics.average_precision_score(
             targets['offset_roll'].flatten(), 
-            outputs['offset_output'].flatten(), average='macro')
+            outputs['offset_output'].flatten(),
+            average='macro')
     
-    # We use masked error calculation in order to only evaluate locations
-    # where either the prediction or ground truth actually exists
-    if 'reg_onset_output' in outputs.keys():
-        mask = (np.sign(outputs['reg_onset_output'] + targets['reg_onset_roll'] - 0.01) + 1) / 2
-        stats['reg_onset_mae'] = masked_average_error(outputs['reg_onset_output'], 
-            targets['reg_onset_roll'], mask)
-
-    if 'reg_offset_output' in outputs.keys():
-        mask = (np.sign(outputs['reg_offset_output'] + targets['reg_offset_roll'] - 0.01) + 1) / 2
-        stats['reg_offset_mae'] = masked_average_error(outputs['reg_offset_output'], 
-            targets['reg_offset_roll'], mask)
+    with torch.set_grad_enabled(False):
+        # We use masked error calculation in order to only evaluate locations
+        # where either the prediction or ground truth actually exists
+        if 'reg_onset_output' in outputs.keys():
+            mask = (torch.sign(outputs['reg_onset_output'] + targets['reg_onset_roll'] - 0.01) + 1) / 2
+            stats['reg_onset_mae'] = masked_average_error(
+                outputs['reg_onset_output'].to(device), 
+                targets['reg_onset_roll'].to(device),
+                mask.to(device)).detach().item()
+        
+        if 'reg_offset_output' in outputs.keys():
+            mask = (torch.sign(outputs['reg_offset_output'] + targets['reg_offset_roll'] - 0.01) + 1) / 2
+            stats['reg_offset_mae'] = masked_average_error(
+                outputs['reg_offset_output'].to(device),
+                targets['reg_offset_roll'].to(device),
+                mask.to(device)).detach().item()
     
     return stats
 
@@ -275,7 +310,7 @@ class TranscriptionProcessor:
         
         note_frame_intervals.sort(key=lambda n: n[0])
 
-        return note_frame_intervals    
+        return note_frame_intervals
 
     def transcribe(self, x):
         num_segments = math.ceil(len(x)/SEGMENT_SAMPLES)
@@ -283,7 +318,8 @@ class TranscriptionProcessor:
         x = np.concatenate((x, np.zeros(pad_length)), axis=0)
 
         segments = torch.tensor(self.generate_segments(x))
-        outputs = get_model_predictions(self.model, segments, self.device, batch_size=256)
+        outputs = get_model_predictions(self.model, segments, self.device,
+                                        batch_size=32, apply_sigmoid=True)
         for key, value in outputs.items():
             outputs[key] = self.combine_segment_predictions(value)
         

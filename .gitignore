@@ -1,6 +1,7 @@
 extra/
 logs/
 temp/
+musicnet/
 
 *.wav
 *.log
