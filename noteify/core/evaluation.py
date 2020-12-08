@@ -92,7 +92,7 @@ def get_model_predictions(model,
 
         with torch.set_grad_enabled(False):
             model.eval()
-            batch_outputs = model(batch_inputs, apply_sigmoid=True)
+            batch_outputs = model(batch_inputs, apply_sigmoid=apply_sigmoid)
         
         for key, value in batch_outputs.items():
             outputs[key].append(value.detach().cpu().numpy())
@@ -130,20 +130,20 @@ def get_evaluation_stats(model, dataloader, device):
     # Frame, onset and offset evaluation
     if 'frame_output' in outputs.keys():
         stats['frame_avg_precision'] = metrics.average_precision_score(
-            targets['frame_roll'].flatten(), 
-            outputs['frame_output'].flatten(),
+            targets['frame_roll'].numpy().flatten(), 
+            outputs['frame_output'].numpy().flatten(),
             average='macro')
     
     if 'onset_output' in outputs.keys():
         stats['onset_macro_avg_precision'] = metrics.average_precision_score(
-            targets['onset_roll'].flatten(), 
-            outputs['onset_output'].flatten(),
+            targets['onset_roll'].numpy().flatten(), 
+            outputs['onset_output'].numpy().flatten(),
             average='macro')
 
     if 'offset_output' in outputs.keys():
         stats['offset_avg_precision'] = metrics.average_precision_score(
-            targets['offset_roll'].flatten(), 
-            outputs['offset_output'].flatten(),
+            targets['offset_roll'].numpy().flatten(), 
+            outputs['offset_output'].numpy().flatten(),
             average='macro')
     
     with torch.set_grad_enabled(False):

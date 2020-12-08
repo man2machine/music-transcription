@@ -113,14 +113,14 @@ class AcousticCRNN(nn.Module):
 
         self.conv_block1 = BasicConvBlock(in_channels=1, out_channels=24)
         self.conv_block2 = BasicConvBlock(in_channels=24, out_channels=32)
-        self.res_conv_block2 = ResNetFreqConvBlock(
-            in_channels=32,
-            out_channels=32,
-            kernel1_size=(1, NUM_BINS//4 + 1),
-            padding1_size=(0, NUM_BINS//8),
-            kernel2_size=(9, 1),
-            padding2_size=(4, 0)
-        )
+        # self.res_conv_block2 = ResNetFreqConvBlock(
+        #     in_channels=32,
+        #     out_channels=32,
+        #     kernel1_size=(1, NUM_BINS//4 + 1),
+        #     padding1_size=(0, NUM_BINS//8),
+        #     kernel2_size=(9, 1),
+        #     padding2_size=(4, 0)
+        # )
         self.conv_block3 = BasicConvBlock(in_channels=32, out_channels=48)
         self.conv_block4 = BasicConvBlock(in_channels=48, out_channels=64)
 
@@ -149,7 +149,7 @@ class AcousticCRNN(nn.Module):
         x = self.conv_block2(x) # (batch_size, num_channels, num_frames, freq_bins2)
         x = self.pool(x) # (batch_size, num_channels, num_frames, freq_bins3)
 
-        x = self.res_conv_block2(x)
+        # x = self.res_conv_block2(x)
         
         x = self.conv_block3(x) # (batch_size, num_channels, num_frames, freq_bins3)
         x = self.pool(x) # (batch_size, num_channels, num_frames, freq_bins4)
@@ -157,7 +157,6 @@ class AcousticCRNN(nn.Module):
         x = self.conv_block4(x) # (batch_size, num_channels, num_frames, freq_bins4)
         x = self.pool(x) # (batch_size, num_channels, num_frames, freq_bins5)
 
-        # time_steps = num_frames
         x =  x.transpose(1, 2).flatten(2) # (batch_size, time_steps, channels_num * freq_bins5)
         
         x = self.fc1(x) # (batch_size, time_steps, linear_feats)
@@ -211,7 +210,6 @@ class TranscriptionNN(nn.Module):
         x = self.spec_layer(x) # (batch_size, freq_bins, num_frames)
         x = x.transpose(1, 2)
         x = x.unsqueeze(1) # (batch_size, num_channels, num_frames, freq_bins)
-
         x = x.transpose(1, 3)
         x = self.bn(x) # normalize spectrogram accross frequency
         x = x.transpose(1, 3) # (batch_size, num_channels, num_frames, freq_bins)

@@ -31,8 +31,8 @@ def make_optimizer(model, lr=0.001, verbose=False):
                 print("\t", name)
     
     optimizer = optim.Adam(params_to_update, lr=lr,
-        eps=1e-08, amsgrad=True)
-    nn.utils.clip_grad_norm_(params_to_update, 8.0)
+        betas=(0.9, 0.999), eps=1e-08, weight_decay=0., amsgrad=True)
+    nn.utils.clip_grad_norm_(params_to_update, 3.0)
     
     return optimizer
 
@@ -95,6 +95,7 @@ def train_model(
     save_all=False,
     save_log=False,
     num_epochs=1,
+    test_batch_interval=None,
     train_batch_multiplier=1):
     
     start_time = time.time()
@@ -121,11 +122,10 @@ def train_model(
             if epoch_phase == 'train':
                 running_loss = 0.0   
                 running_count = 0
-                batch_count = 0
+                batch_step_count = 0
+                batch_num = 0
                 
                 train_loss_record = []
-                # Iterate over data.
-                # TQDM has nice progress bars
                 pbar = tqdm(dataloaders['train'])
                 for inputs, targets in pbar:
                     inputs = inputs.to(device)
@@ -151,11 +151,11 @@ def train_model(
                         train_loss_record.append([n.detach().item() for n in loss_parts])
                         
                         loss.backward()
-                        if batch_count == 0:
+                        if batch_step_count == 0:
                             optimizer.step()
-                            batch_count = train_batch_multiplier
+                            batch_step_count = train_batch_multiplier
                     
-                        batch_count -= 1
+                        batch_step_count -= 1
                         
                     running_loss += loss.detach().item() * inputs.size(0)
                     running_count += inputs.size(0)
@@ -169,12 +169,17 @@ def train_model(
                     pbar.set_description(desc)
                     
                     del loss, loss_parts
+
+                    batch_num += 1
+                    if test_batch_interval and ((batch_num % test_batch_interval) == 0):
+                        stats = get_evaluation_stats(model, dataloaders['test'], device)
+                        print("Test statistics:", stats)
                 pbar.close()
 
                 print("Training Loss: {:.4f}".format(epoch_loss))
                 train_loss_info['loss'] = train_loss_record
             
-            elif epoch_phase == 'test':
+            elif epoch_phase == 'test' and test_batch_interval is None:
                 stats = get_evaluation_stats(model, dataloaders['test'], device)
                 print("Test statistics:", stats)
             

@@ -10,10 +10,12 @@ import mmap
 import pickle
 import errno
 import math
+import json
 import csv
 import subprocess
 import tarfile
 import urllib.request
+import collections
 
 import numpy as np
 import torch
@@ -23,6 +25,7 @@ import sox
 from scipy.io import wavfile
 from intervaltree import IntervalTree
 from tqdm import tqdm
+import mido
 
 from noteify.core.config import (
     SAMPLE_RATE, HOP_LENGTH, NUM_NOTES, MIN_MIDI,
@@ -30,6 +33,16 @@ from noteify.core.config import (
     FRAMES_PER_SECOND)
 
 SIZE_FLOAT = 4 # size of a float
+
+def create_note_event(midi_note, onset_time, offset_time, velocity=127):
+    return {'midi_note': midi_note,
+            'onset_time': onset_time,
+            'offset_time': offset_time,
+            'velocity': velocity}
+
+def create_pedal_event(onset_time, offset_time):
+    return {'onset_time': onset_time,
+            'offset_time': offset_time}
 
 class MusicNetDataset:
     DATA_URL = "https://homes.cs.washington.edu/~thickstn/media/musicnet.tar.gz"
@@ -260,7 +273,7 @@ class MusicNetDataset:
             trees[rec_id] = tree
         return trees
 
-    def get_record_length(self, rec_id):
+    def get_record_num_samples(self, rec_id):
         """
         Outputs (sample rate, num samples)
         """
@@ -296,6 +309,331 @@ class MusicNetDataset:
             note_infos[n]['end_sample'] = info['end_sample']*factor
 
         return x, note_infos
+
+class MaestroDataset:
+    BIN_SAMPLE_RATE = SAMPLE_RATE
+
+    def __init__(self,
+                 data_dir,
+                 download=False,
+                 refresh_cache=False,
+                 delete_wav=False,
+                 train=True,
+                 use_mmap=False,
+                 numpy_cache=False,
+                 numpy_resample_sr=None,
+                 filter_records=None,
+                 reduce_record_factor=None):
+
+        self.root_dir = os.path.abspath(os.path.expanduser(data_dir))
+        self.refresh_cache = refresh_cache
+        self.delete_wav = delete_wav
+        self.train = train
+        self.use_mmap = use_mmap
+        self.numpy_cache = numpy_cache
+        self.numpy_resample_sr = numpy_resample_sr
+        
+        self.sample_rate = self.BIN_SAMPLE_RATE
+        if self.numpy_resample_sr:
+            assert numpy_cache
+            self.sample_rate = self.numpy_resample_sr
+        
+        if self.numpy_cache or self.use_mmap:
+            raise ValueError("This is cannot fit in memory")
+
+        if not self.check_dataset_exists():
+            raise ValueError("Could not find dataset")
+
+        with open(os.path.join(self.root_dir, "maestro-v3.0.0.json")) as f:
+            orig_metadata = json.load(f)
+
+        self.metadata = {}
+        for category in orig_metadata.keys():
+            category_data = orig_metadata[category]
+            
+            for element_id in category_data.keys():
+                if element_id not in self.metadata.keys():
+                    self.metadata[element_id] = {}
+                self.metadata[element_id][category] = orig_metadata[category][element_id]
+    
+        self.all_rec_ids = self.metadata.keys()
+        if self.train:
+            self.rec_ids = [n for n in self.all_rec_ids if self.metadata[n]['split'] == 'train']
+        else:
+            self.rec_ids = [n for n in self.all_rec_ids if self.metadata[n]['split'] == 'test']
+        
+        if filter_records is not None:
+            self.rec_ids = [n for n in self.rec_ids if n in filter_records]
+
+        if reduce_record_factor:
+            self.rec_ids = self.rec_ids[:int(len(self.rec_ids)/reduce_record_factor)]
+
+        if not self.check_processed():
+            self.process_data()
+        
+        self.records = dict()
+        self.open_files = []
+
+        print("Loading audio")
+        for rec_id in tqdm(self.rec_ids):
+            audio_fname = self.metadata[rec_id]['audio_filename']
+            midi_fname = self.metadata[rec_id]['midi_filename']
+            tree_fname = audio_fname[:-4]+'_tree.pckl'
+            events_fname = audio_fname[:-4]+'_events.pckl'
+            bin_fname = audio_fname[:-4]+'.bin'
+
+            audio_fname = os.path.join(self.root_dir, audio_fname)
+            midi_fname = os.path.join(self.root_dir, midi_fname)
+            tree_fname = os.path.join(self.root_dir, tree_fname)
+            events_fname = os.path.join(self.root_dir, events_fname)
+            bin_fname = os.path.join(self.root_dir, bin_fname)
+            
+            if self.use_mmap:
+                fd = os.open(bin_fname, os.O_RDONLY)
+                buf = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+                self.records[rec_id] = (buf, len(buf)//SIZE_FLOAT,
+                    bin_fname, tree_fname, events_fname)
+                self.open_files.append(fd)
+            if self.numpy_cache:
+                f = open(bin_fname, 'rb')
+                x = np.fromfile(f, dtype=np.float32)
+                if self.numpy_resample_sr:
+                    x = librosa.resample(x, self.BIN_SAMPLE_RATE, self.sample_rate)
+                self.records[rec_id] = (x, len(x),
+                    bin_fname, tree_fname, events_fname)
+                f.close()
+            else:
+                f = open(bin_fname)
+                fsize = os.fstat(f.fileno()).st_size//SIZE_FLOAT
+                self.records[rec_id] = (bin_fname, fsize,
+                    bin_fname, tree_fname, events_fname)
+                f.close()
+    
+    def check_dataset_exists(self):
+        return os.path.exists(os.path.join(self.root_dir, "maestro-v3.0.0.json"))
+    
+    def check_processed(self):
+        return os.path.exists(os.path.join(self.root_dir, "check.json"))
+    
+    def get_record_length(self, rec_id):
+        return self.metadata[rec_id]['duration']
+    
+    def get_record_num_samples(self, rec_id):
+        return self.records[rec_id][1]
+
+    def process_data(self):
+        pbar = tqdm(self.rec_ids)
+        for rec_id in pbar:
+            audio_fname = self.metadata[rec_id]['audio_filename']
+            bin_fname = audio_fname[:-4]+'.bin'
+            pbar.set_description(audio_fname)
+
+            bin_fname = os.path.join(self.root_dir, bin_fname)
+            exist = os.path.exists(bin_fname)
+            if not exist or (exist and os.path.getsize(bin_fname) > 0):
+                data, sr = librosa.core.load(os.path.join(self.root_dir, audio_fname),
+                    mono=True, sr=self.BIN_SAMPLE_RATE)
+                data.tofile(bin_fname)
+        
+        pbar = tqdm(self.rec_ids)
+        for rec_id in pbar:
+            midi_fname = self.metadata[rec_id]['midi_filename']
+            events_fname = audio_fname[:-4]+'_events.pckl'
+            tree_fname = audio_fname[:-4]+'_tree.pckl'
+            pbar.set_description(midi_fname)
+
+            event_info, tree_info = self.get_label_info(midi_fname)
+
+            events_fname = os.path.join(self.root_dir, events_fname)
+            with open(events_fname, 'wb') as f:
+                pickle.dump(event_info, f)
+            
+            tree_fname = os.path.join(self.root_dir, tree_fname)
+            with open(tree_fname, 'wb') as f:
+                pickle.dump(tree_info, f)
+
+        with open(os.path.join(self.root_dir, "check.json")) as f:
+            json.dump({}, f)
+    
+    def read_midi(self, midi_fname):
+        midi_file = mido.MidiFile(midi_fname)
+        ticks_per_beat = midi_file.ticks_per_beat
+
+        assert len(midi_file.tracks) == 2
+        # The first track contains tempo, time signature. The second track contains piano events
+
+        microseconds_per_beat = midi_file.tracks[0][0].tempo
+        beats_per_second = 1e6 / microseconds_per_beat
+        ticks_per_second = ticks_per_beat * beats_per_second
+
+        message_list = []
+
+        ticks = 0
+        time_in_second = []
+
+        for message in midi_file.tracks[1]:
+            message_list.append(message)
+            ticks += message.time
+            time_in_second.append(ticks / ticks_per_second)
+
+        result = {
+            'midi_events': message_list, 
+            'midi_event_times': np.array(time_in_second)}
+        
+        return result
+    
+    def extend_pedal(self, note_events, pedal_events):
+        note_events = collections.deque(note_events)
+        pedal_events = collections.deque(pedal_events)
+        ex_note_events = []
+
+        index = 0 # Index of note events
+        while pedal_events: # Go through all pedal events
+            pedal_event = pedal_events.popleft()
+            note_buffer = {} # keys: midi notes, value for each key: event index
+
+            while note_events:
+                note_event = note_events.popleft()
+
+                # If a note offset is between the onset and offset of a pedal, 
+                # Then set the note offset to when the pedal is released.
+                if pedal_event['onset_time'] < note_event['offset_time'] < pedal_event['offset_time']:
+                    
+                    midi_note = note_event['midi_note']
+
+                    if midi_note in note_buffer.keys():
+                        # Multiple same note inside a pedal
+                        _idx = note_buffer[midi_note]
+                        note_buffer.pop(midi_note)
+                        ex_note_events[_idx]['offset_time'] = note_event['onset_time']
+
+                    # Set note offset to pedal offset
+                    note_event['offset_time'] = pedal_event['offset_time']
+                    note_buffer[midi_note] = index
+                
+                ex_note_events.append(note_event)
+                index += 1
+
+                # Break loop and pop next pedal
+                if note_event['offset_time'] > pedal_event['offset_time']:
+                    break
+
+        while note_events:
+            # Append any other notes
+            ex_note_events.append(note_events.popleft())
+        
+        return ex_note_events
+    
+    def parse_midi(self, midi_info):
+        midi_events = midi_info['midi_events']
+        midi_event_times = midi_info['midi_event_times']
+        start_time = min(midi_event_times)
+        end_time = max(midi_event_times)
+
+        note_events = []
+        pedal_events = []
+
+        note_buffer = {}
+        pedal_buffer = {}
+
+        for i in range(len(midi_events)):
+            event = midi_events[n]
+            event_time = midi_event_times[n]
+            if event.type == 'note_on' or event.type == 'note_off':
+                midi_note = event.note
+                velocity = event.velocity
+
+                if event.type == 'note_on' and velocity > 0:
+                    note_buffer[midi_note] = {
+                        'onset_time': event_time,
+                        'velocity': velocity}
+                else:
+                    if midi_note in note_buffer.keys():
+                        note_events.append(create_note_event(
+                            midi_note,
+                            note_buffer[midi_note]['onset_time'],
+                            event_time,
+                            note_buffer[midi_note]['velocity']))
+                        note_buffer.pop(midi_note)
+            
+            elif event.type == 'control_change' and event.control == 64:
+                pedal_value = event.ValueError
+                if pedal_value >= 64:
+                    if 'onset_time' not in pedal_buffer:
+                        pedal_buffer['onset_time'] = event_time
+                else:
+                    if 'onset_time' in pedal_buffer:
+                        pedal_events.append(create_pedal_event(
+                            pedal_buffer['onset_time'],
+                            event_time))
+                        pedal_buffer = {}
+        
+        for midi_note, info in note_buffer.items():
+            note_events.append(create_note_event(
+                midi_note,
+                info['onset_time'],
+                end_time,
+                info['velocity']))
+        
+        if pedal_buffer:
+            pedal_events.append(create_pedal_event(
+                pedal_buffer['onset_time'],
+                end_time))
+
+        # Set notes to on until pedal is released
+        if extend_pedal:
+            note_events = self.extend_pedal(note_events, pedal_events)
+    
+        return note_events, pedal_events
+    
+    def get_label_info(self, midi_fname):
+        midi_info = self.read_midi(midi_fname)
+        note_events, pedal_events = self.parse_midi(midi_info)
+
+        note_tree = IntervalTree()
+        pedal_tree = IntervalTree()
+
+        for note_event in note_events:
+            start_sample = math.floor(note_event['onset_time']*self.BIN_SAMPLE_RATE)
+            end_sample = math.floor(note_event['offnset_time']*self.BIN_SAMPLE_RATE)
+            note_tree[start_sample:end_sample] = note_event
+        
+        for pedal_event in pedal_events:
+            start_sample = math.floor(pedal_event['onset_time']*self.BIN_SAMPLE_RATE)
+            end_sample = math.floor(pedal_event['offnset_time']*self.BIN_SAMPLE_RATE)
+            pedal_tree[start_sample:end_sample] = pedal_events
+        
+        event_info = {'note_events': note_events, 'pedal_events': pedal_events}
+        tree_info = {'note_tree': note_tree, 'pedal_tree': pedal_tree}
+
+        return event_info, tree_info
+    
+    def get_record_data(self, rec_id, start_sample=None, end_sample=None):
+        if start_sample is None:
+            start_sample = 0
+        if end_sample is None:
+            end_sample = self.records[rec_id][1]
+        
+        bin_fname = self.records[rec_id][2]
+        start_pos = int(start_sample)*SIZE_FLOAT
+        end_pos = int(end_sample)*SIZE_FLOAT
+        if self.use_mmap:
+            x = np.frombuffer(self.records[rec_id][0][start_pos:end_pos], dtype=np.float32).copy()
+        elif self.numpy_cache:
+            x = self.records[rec_id][0][start_sample:end_sample].copy()
+        else:
+            with open(bin_fname, 'rb') as f:
+                f.seek(start_pos, os.SEEK_SET)
+                x = np.fromfile(f, dtype=np.float32, count=(end_sample - start_sample))
+        
+        tree_fname = self.records[rec_id][3]
+        with open(tree_fname, 'rb') as f:
+            tree = pickle.load(f)
+        
+        intervals = tree[start_sample:end_sample + 1]
+        note_events = [n.data.copy() for n in intervals]
+
+        return x, note_events
 
 class MusicAugmentor:
     def __init__(self, noise=True):
@@ -336,12 +674,6 @@ class MusicAugmentor:
 
     def loguniform(self, low, high, size):
         return np.exp(self.rng.uniform(np.log(low), np.log(high), size))
-
-def create_note_event(midi_note, onset_time, offset_time, velocity=127):
-    return {'midi_note': midi_note,
-            'onset_time': onset_time,
-            'offset_time': offset_time,
-            'velocity': velocity}
 
 def get_regression(reg_input):
     """
@@ -393,7 +725,7 @@ def generate_rolls(note_events, start_time, end_time):
             onset_time = note_event['onset_time']
             offset_time = note_event['offset_time']
 
-            if onset_time > end_time:
+            if onset_time >= end_time:
                 continue
 
             start_frame = int(
@@ -401,6 +733,9 @@ def generate_rolls(note_events, start_time, end_time):
             end_frame = int(
                 round((offset_time - start_time)*FRAMES_PER_SECOND))
             
+            if start_frame >= SEGMENT_FRAMES:
+                continue
+
             if end_frame >= 0:
                 clip_start_frame = max(start_frame, 0)
 
@@ -503,7 +838,7 @@ class MusicNetSampler:
                 start_time = np.random.uniform(0, SEGMENT_LENGTH)
             else:
                 start_time = 0
-            rec_length = self.raw_dataset.get_record_length(rec_id)/self.raw_dataset.sample_rate
+            rec_length = self.raw_dataset.get_record_num_samples(rec_id)/self.raw_dataset.sample_rate
             while (start_time + SEGMENT_LENGTH < (rec_length - 0.01)):
                 start_sample = int(start_time*self.raw_dataset.sample_rate)
                 self.segment_infos.append((rec_id, start_sample))
