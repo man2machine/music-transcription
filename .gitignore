@@ -1,3 +1,19 @@
+extra/
+logs/
+temp/
+musicnet/
+maestro/
+
+*.wav
+*.midi
+*.bin
+*.pckl
+*.log
+*.csv
+*.out
+
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

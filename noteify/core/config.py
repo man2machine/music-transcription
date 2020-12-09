@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec  4 14:58:49 2020
+
+@author: Shahir
+"""
+
+import math
+
+SAMPLE_RATE = 16000 # highest note detected is C8 4186.009 Hz
+MIN_FREQ = 27.500 # A0
+MIN_MIDI = 21 # A0
+NUM_NOTES = 88 # full piano
+BINS_PER_NOTE = 2
+BINS_PER_OCTAVE = 12 * BINS_PER_NOTE
+NUM_BINS = NUM_NOTES * BINS_PER_NOTE 
+HOP_LENGTH = 512 # int(0.032 * SAMPLE_RATE) (samples per frame)
+SEGMENT_LENGTH = 6 # seconds
+SEGMENT_SAMPLES = SEGMENT_LENGTH * SAMPLE_RATE
+SEGMENT_FRAMES = math.ceil(SEGMENT_SAMPLES/HOP_LENGTH)
+FRAMES_PER_SECOND = SAMPLE_RATE/HOP_LENGTH
+EPSILON = 1e-7
