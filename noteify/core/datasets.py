@@ -447,7 +447,12 @@ class MaestroDataset:
     
     def get_record_filenames(self, rec_id):
         record = self.records[rec_id]
-        return self.metadata[rec_id]['audio_filename'], self.metadata[rec_id]['midi_filename'], record[2], record[3], record[4]
+        audio_fname = self.metadata[rec_id]['audio_filename']
+        midi_fname = self.metadata[rec_id]['midi_filename']
+        audio_fname = os.path.join(self.root_dir, audio_fname)
+        midi_fname = os.path.join(self.root_dir, midi_fname)
+        bin_fname, tree_fname, events_fname = record[2:5]
+        return audio_fname, midi_fname, bin_fname, tree_fname, events_fname
 
     def get_record_length(self, rec_id):
         return self.metadata[rec_id]['duration']

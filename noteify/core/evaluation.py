@@ -11,12 +11,14 @@ import collections
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn import metrics
+from skimage.transform import resize as sk_resize
 import torch
 from tqdm import tqdm
 
 from noteify.core.config import (NUM_NOTES, SEGMENT_SAMPLES, HOP_LENGTH,
-                                 FRAMES_PER_SECOND, MIN_MIDI)
+                                 FRAMES_PER_SECOND, MIN_MIDI, BINS_PER_NOTE)
 from noteify.core.datasets import create_note_event
+from noteify.core.models import SpectrogramLayer
 
 def targets_to_device(targets, device):
     for key, value in targets.items():
@@ -193,7 +195,7 @@ class TranscriptionProcessor:
         start_index = 0
         while True:
             end_index = start_index + SEGMENT_SAMPLES
-            if end_index >= len(x):
+            if end_index > len(x):
                 break
             segments.append(x[start_index:end_index])
             start_index += SEGMENT_SAMPLES // 2
@@ -201,21 +203,40 @@ class TranscriptionProcessor:
         segments = np.stack(segments, axis=0)
         return segments
 
-    def combine_segment_predictions(self, segment_outputs):
+    def combine_segment_predictions(self, segment_outputs, num_samples):
         if len(segment_outputs) == 1:
             return segment_outputs[0]
         
         # segment_outputs is (num_segments, num_frames, num_notes)
-        x = segment_outputs[:, :-1] # remove last frame
+        zs = segment_outputs[:, :-1] # remove last frame
         num_segments, num_frames, num_notes = segment_outputs.shape
-        
+
+        segment_samples_diff = SEGMENT_SAMPLES//2
+
         segment_predictions = []
-        start_frame = int(num_frames * 0.25)
-        end_frame = num_frames - start_frame
-        segment_predictions.append(x[0, :end_frame])
-        for n in range(1, num_segments - 1):
-            segment_predictions.append(x[n, start_frame:end_frame])
-        segment_predictions.append(x[-1, start_frame:])
+        current_frame_start_sample = 0
+        last_end_cut_sample = 0
+        expected_start_cut_sample = 0
+        expected_end_cut_sample = SEGMENT_SAMPLES*0.75
+
+        for n in range(0, num_segments):
+            if n == (num_segments - 1):
+                expected_end_cut_sample = num_samples
+            
+            start_cut_frame = int((expected_start_cut_sample - current_frame_start_sample)//HOP_LENGTH)
+            end_cut_frame = int((expected_end_cut_sample - current_frame_start_sample)//HOP_LENGTH)
+            section = zs[n, start_cut_frame:end_cut_frame]
+            segment_predictions.append(section)
+            
+            # sample the segment we just added after cutting actually ends on
+            last_end_cut_sample += (end_cut_frame - start_cut_frame) * HOP_LENGTH
+
+            # what sample the next frame starts on
+            current_frame_start_sample += segment_samples_diff
+            # what frame we want the cut to start on
+            expected_start_cut_sample = last_end_cut_sample
+            # what frame we want the cut to end on
+            expected_end_cut_sample += segment_samples_diff
 
         pred = np.concatenate(segment_predictions, axis=0)
 
@@ -327,11 +348,57 @@ class TranscriptionProcessor:
         return note_frame_intervals
 
     def recompute_velocities(self, x, note_events):
-        pass
+        spec_model = SpectrogramLayer()
+        spec_model = spec_model.to(self.device)
+        x = torch.tensor(x, dtype=torch.float).unsqueeze(0).to(self.device)
+
+        with torch.set_grad_enabled(False):
+            spec = spec_model(x).transpose(1, 2) # (batch_size, num_frames, freq_bins)
+        spec = spec[0].cpu().numpy()
+
+        lookahead = 10
+        num_frames, freq_bins = spec.shape
+        spec = sk_resize(spec, (num_frames, NUM_NOTES))
+        spec = np.concatenate((spec, np.zeros((lookahead, NUM_NOTES))), axis=0)
+
+        note_indices = []
+        frame_intervals = []
+        for note_event in note_events:
+            onset_time = note_event['onset_time']
+            offset_time = note_event['offset_time']
+            midi_note = note_event['midi_note']
+
+            onset_frame = int(round(onset_time * FRAMES_PER_SECOND))
+            offset_frame = int(round(offset_time * FRAMES_PER_SECOND))
+
+            start_bin = midi_note - MIN_MIDI
+            note_indices.append(start_bin)
+            frame_range = np.arange(onset_frame, onset_frame + lookahead)
+            frame_intervals.append(frame_range)
+        
+        note_indices = np.array(note_indices)
+        note_indices = note_indices.reshape(len(note_indices), 1)
+        frame_intervals = np.array(frame_intervals)
+
+        indexed_spec = spec[frame_intervals, note_indices]
+        magnitudes = np.average(indexed_spec, axis=1)
+
+        min_mag = np.min(magnitudes)
+        max_mag = np.max(magnitudes)
+
+        min_vel = 48
+        max_vel = 120
+
+        velocities = (magnitudes - min_mag)/(max_mag - min_mag)
+        velocities = (velocities*(max_vel - min_vel) + min_vel).astype(np.int)
+        velocities = np.clip(velocities, min_vel, max_vel)
+
+        for n, note_event in enumerate(note_events):
+            note_event['velocity'] = int(velocities[n])
 
     def transcribe(self, x, pbar=True):
-        num_segments = math.ceil(len(x)/SEGMENT_SAMPLES)
-        pad_length = num_segments*SEGMENT_SAMPLES - len(x)
+        k = math.ceil(len(x)/SEGMENT_SAMPLES)
+        pad_length = k*SEGMENT_SAMPLES - len(x)
         x = np.concatenate((x, np.zeros(pad_length)), axis=0)
 
         segments = torch.tensor(self.generate_segments(x), dtype=torch.float)
@@ -339,7 +406,7 @@ class TranscriptionProcessor:
                                         batch_size=self.batch_size, apply_sigmoid=True,
                                         pbar=pbar)
         for key, value in outputs.items():
-            outputs[key] = self.combine_segment_predictions(value)
+            outputs[key] = self.combine_segment_predictions(value, len(x))
         
         frame_output = outputs['frame_output']
 
@@ -372,5 +439,6 @@ class TranscriptionProcessor:
                     end_time)
                 note_events.append(note_event)
         
-        return note_events
+        self.recompute_velocities(x, note_events)
 
+        return note_events
