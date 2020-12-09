@@ -2,8 +2,12 @@ extra/
 logs/
 temp/
 musicnet/
+maestro/
 
 *.wav
+*.midi
+*.bin
+*.pckl
 *.log
 *.csv
 *.out

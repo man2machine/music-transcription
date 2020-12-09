@@ -445,6 +445,10 @@ class MaestroDataset:
             return True
         return False
     
+    def get_record_filenames(self, rec_id):
+        record = self.records[rec_id]
+        return self.metadata[rec_id]['audio_filename'], self.metadata[rec_id]['midi_filename'], record[2], record[3], record[4]
+
     def get_record_length(self, rec_id):
         return self.metadata[rec_id]['duration']
     

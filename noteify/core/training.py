@@ -107,7 +107,7 @@ def train_model(
     
     def test_stats():
         dataloaders['test'].batch_sampler.generate_segments()
-        stats = get_evaluation_stats(model, dataloaders['test'], device)
+        stats = get_evaluation_stats(model, dataloaders['test'], device, pbar=True)
         print("Test statistics:", stats)
     
     for epoch in range(num_epochs):
@@ -202,3 +202,31 @@ def train_model(
     print("Training complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
     
     return tracker
+
+def save_training_session(model,
+                          optimizer,
+                          save_dir):
+    sub_dir = "Session {}".format(get_timestamp())
+    save_dir = os.path.join(save_dir, sub_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    torch.save(model.state_dict(), os.path.join(save_dir, "Model State.pckl"))
+    torch.save(optimizer.state_dict(), os.path.join(save_dir, "Optimizer State.pckl"))
+    
+    print("Saved session to", save_dir)
+
+def load_training_session(model,
+                          optimizer,
+                          session_dir,
+                          update_models=True,
+                          map_location=None):
+    if update_models:
+        model.load_state_dict(torch.load(os.path.join(session_dir, "Model State.pckl"), map_location=map_location))
+        optimizer.load_state_dict(torch.load(os.path.join(session_dir, "Optimizer State.pckl"), map_location=map_location))
+    
+    print("Loaded session from", session_dir)
+
+    out_data = {'model': model,
+                'optimizer': optimizer}
+    
+    return out_data

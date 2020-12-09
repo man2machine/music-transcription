@@ -9,11 +9,12 @@ import math
 import collections
 
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn import metrics
 import torch
 from tqdm import tqdm
 
-from noteify.core.config import (NUM_NOTES, SEGMENT_SAMPLES,
+from noteify.core.config import (NUM_NOTES, SEGMENT_SAMPLES, HOP_LENGTH,
                                  FRAMES_PER_SECOND, MIN_MIDI)
 from noteify.core.datasets import create_note_event
 
@@ -82,13 +83,17 @@ def get_model_predictions(model,
                           inputs,
                           device,
                           batch_size,
-                          apply_sigmoid=False):
+                          apply_sigmoid=False,
+                          pbar=False):
     
     outputs = collections.defaultdict(list)
 
+    if pbar:
+        bar = tqdm(total=math.ceil(len(inputs)/batch_size))
     index = 0
-    while index <= len(inputs):
+    while index < len(inputs):
         batch_inputs = inputs[index:index+batch_size].to(device)
+        index += batch_size
 
         with torch.set_grad_enabled(False):
             model.eval()
@@ -96,6 +101,11 @@ def get_model_predictions(model,
         
         for key, value in batch_outputs.items():
             outputs[key].append(value.detach().cpu().numpy())
+        
+        if pbar:
+            bar.update(1)
+    if pbar:
+        bar.close()
     
     outputs = dict(outputs)
     for key in outputs:
@@ -115,7 +125,7 @@ def masked_average_error(target, output, mask):
         output *= mask
         return torch.sum(torch.abs(target - output)) / torch.clamp(torch.sum(mask), min=1e-8)
 
-def get_evaluation_stats(model, dataloader, device, max_iter=10),:
+def get_evaluation_stats(model, dataloader, device, max_iter=10, pbar=True):
     stats = {}
     
     result = get_model_outputs(model,
@@ -123,7 +133,8 @@ def get_evaluation_stats(model, dataloader, device, max_iter=10),:
                                device,
                                return_targets=True,
                                apply_sigmoid=True,
-                               max_iter=max_iter)
+                               max_iter=max_iter,
+                               pbar=pbar)
     targets = result['targets']
     outputs = result['outputs']
 
@@ -166,9 +177,10 @@ def get_evaluation_stats(model, dataloader, device, max_iter=10),:
     return stats
 
 class TranscriptionProcessor:
-    def __init__(self, model, device):
+    def __init__(self, model, device, batch_size):
         self.model = model
         self.device = device
+        self.batch_size = batch_size
 
         self.onset_threshold = 0.3
         self.offset_threshold = 0.3
@@ -195,15 +207,15 @@ class TranscriptionProcessor:
         
         # segment_outputs is (num_segments, num_frames, num_notes)
         x = segment_outputs[:, :-1] # remove last frame
-        num_segments, num_frames, num_notes = x.shape
+        num_segments, num_frames, num_notes = segment_outputs.shape
         
         segment_predictions = []
         start_frame = int(num_frames * 0.25)
         end_frame = num_frames - start_frame
-        segment_predictions.append(segment_outputs[0, :end_frame])
-        for n in range(1, num_frames - 1):
-            segment_predictions.append(segment_outputs[n, start_frame:end_frame])
-        segment_predictions.append(segment_outputs[-1, start_frame:])
+        segment_predictions.append(x[0, :end_frame])
+        for n in range(1, num_segments - 1):
+            segment_predictions.append(x[n, start_frame:end_frame])
+        segment_predictions.append(x[-1, start_frame:])
 
         pred = np.concatenate(segment_predictions, axis=0)
 
@@ -231,7 +243,7 @@ class TranscriptionProcessor:
                     else:
                         shift = (x[n + 1] - x[n - 1]) / (x[n] - x[n - 1]) / 2
                     shift_output[n, k] = shift
-
+        
         return binary_output, shift_output
 
     def is_monotonic_neighbour(self, x, n, neighbours):
@@ -250,8 +262,8 @@ class TranscriptionProcessor:
         offset_output_bin,
         offset_shift_output,
         frame_output):
+
         note_frame_intervals = []
-        
         num_frames = len(onset_output_bin)
         curr_start_index = None
         frame_disappear_index = None
@@ -273,23 +285,23 @@ class TranscriptionProcessor:
                 curr_start_index = i
 
             if curr_start_index is not None and i > curr_start_index:
-                onset_shift = onset_shift_output[curr_start_index]
-                onset_frame = curr_start_index + onset_shift
-
-                if frame_output[i] <= self.frame_threshold:
+                if frame_output[i] <= self.frame_threshold and frame_disappear_index is not None:
                     # frame_output "disappeared"
                     frame_disappear_index = i
                 
-                if offset_output_bin[i] and curr_end_index is None:
+                if offset_output_bin[i] and curr_end_index is not None:
                     # offset detected
                     curr_end_index = i
                 
                 if frame_disappear_index is not None:
-                    # both an offset and a frame disappearance is required to end a note
                     if curr_end_index is not None and (curr_end_index - curr_start_index) > (frame_disappear_index - curr_end_index):
+                        # use offset detection index if it is valid
                         offset_frame = curr_end_index
                     else:
+                        # use frame disappear index otherwise
                         offset_frame = frame_disappear_index
+                    onset_shift = onset_shift_output[curr_start_index]
+                    onset_frame = curr_start_index + onset_shift
                     offset_shift = offset_shift_output[offset_frame]
                     offset_frame += offset_shift
 
@@ -298,28 +310,34 @@ class TranscriptionProcessor:
                     frame_disappear_index = None
                     curr_end_index = None
             
-            if curr_start_index is not None or i == num_frames - 1:
-                # offset not detected
-                offset_shift = offset_shift_output[i]
-                offset_frame = i + offset_shift
-                
-                note_frame_intervals.append((onset_frame, offset_frame))
-                curr_start_index = None
-                frame_disappear_index = None
-                curr_start_index = None
+                if (curr_start_index is not None) and (i - curr_start_index >= 600 or i == num_frames - 1):
+                    # offset not detected
+                    onset_shift = onset_shift_output[i]
+                    onset_frame = curr_start_index + onset_shift
+                    offset_shift = offset_shift_output[i]
+                    offset_frame = i + offset_shift
+                    
+                    note_frame_intervals.append((onset_frame, offset_frame))
+                    curr_start_index = None
+                    frame_disappear_index = None
+                    curr_start_index = None
         
         note_frame_intervals.sort(key=lambda n: n[0])
 
         return note_frame_intervals
 
-    def transcribe(self, x):
+    def recompute_velocities(self, x, note_events):
+        pass
+
+    def transcribe(self, x, pbar=True):
         num_segments = math.ceil(len(x)/SEGMENT_SAMPLES)
         pad_length = num_segments*SEGMENT_SAMPLES - len(x)
         x = np.concatenate((x, np.zeros(pad_length)), axis=0)
 
-        segments = torch.tensor(self.generate_segments(x))
+        segments = torch.tensor(self.generate_segments(x), dtype=torch.float)
         outputs = get_model_predictions(self.model, segments, self.device,
-                                        batch_size=32, apply_sigmoid=True)
+                                        batch_size=self.batch_size, apply_sigmoid=True,
+                                        pbar=pbar)
         for key, value in outputs.items():
             outputs[key] = self.combine_segment_predictions(value)
         
@@ -337,11 +355,11 @@ class TranscriptionProcessor:
         note_events = []
         for note_index in range(NUM_NOTES):
             note_intervals = self.compute_note_intervals(
-                onset_output_bin[note_index],
-                onset_shift_output[note_index],
-                offset_output_bin[note_index],
-                offset_shift_output[note_index],
-                frame_output[note_index])
+                onset_output_bin[:, note_index],
+                onset_shift_output[:, note_index],
+                offset_output_bin[:, note_index],
+                offset_shift_output[:, note_index],
+                frame_output[:, note_index])
             
             midi_note = note_index + MIN_MIDI
             for start_frame, end_frame in note_intervals:
